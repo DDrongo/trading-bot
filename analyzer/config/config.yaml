@@ -1,0 +1,390 @@
+analysis:
+  adx_thresholds:
+    moderate: 18.0
+    sideways: 0.0
+    strong: 25.0
+    weak: 12.0
+  analysis_interval_minutes: 15
+  caching:
+    calculation_cache_size: 100
+    min_wait_seconds: 1
+  confidence_params:
+    adx_boost: 0.3
+    base_multiplier: 0.08
+    moderate_trend_boost: 0.05
+    sideways_penalty: 0.8
+    strong_trend_boost: 0.15
+    volume_bonus: 0.1
+  confirmation:
+    min_candles_in_zone: 1
+    rr_quality_tolerance: 0.1
+    screen1_min_confidence: 0.65
+    screen2_min_confidence: 0.55
+    volume_spike_threshold: 1.5
+    zone_width_pct: 0.5
+  indicators:
+    adx_period: 14
+    atr_period: 14
+    ema_long_period: 20
+    ema_periods:
+    - 20
+    - 50
+    - 100
+    ema_short_period: 10
+    rsi_period: 14
+    stochastic_d_period: 3
+    stochastic_k_period: 14
+    stochastic_overbought_level: 80
+    stochastic_oversold_level: 20
+    stochastic_slowing: 3
+    stochastic_weak_overbought: 70
+    stochastic_weak_oversold: 30
+  levels_config:
+    pivot_lookback: 20
+    resistance_multiplier: 1.02
+    support_candidate_lookback: 50
+  max_entry_distance_pct: 10.0
+  max_risk_per_trade_pct: 2.0
+  max_spread_pct: 2.0
+  max_symbols_per_cycle: 50
+  max_zone_distance_pct: 2.0
+  min_24h_volume_usd: 500000
+  min_price: 0.001
+  min_rr_ratio: 3.0
+  monitoring_interval_seconds: 60
+  orchestration:
+    continuous_analysis_interval: 15
+    continuous_max_concurrent: 3
+    kline_limits:
+      15m: 100
+      1d: 100
+      1h: 50
+      4h: 50
+      5m: 50
+    log_symbols_limit: 10
+    max_concurrent_analysis: 5
+    min_timeframes_for_analysis: 3
+  patterns:
+    engulfing_confidence_base: 0.6
+    engulfing_confidence_multiplier: 0.2
+    engulfing_max_confidence: 0.85
+    engulfing_min_ratio: 1.0
+    fib_zone_tolerance_pct: 1.0
+    fibonacci_levels:
+    - 0.236
+    - 0.382
+    - 0.5
+    - 0.618
+    - 0.786
+    morning_star_body_multiplier: 0.1
+    morning_star_confidence_base: 0.75
+    morning_star_max_confidence: 0.9
+    pin_bar_body_ratio: 0.3
+    pin_bar_close_position_mid: 0.5
+    pin_bar_min_close_position_bearish: 0.33
+    pin_bar_min_close_position_bullish: 0.66
+    pin_bar_shadow_ratio: 2.0
+    simple_bearish_confidence: 0.6
+    simple_bearish_min_body_ratio: 0.5
+    simple_bullish_confidence: 0.6
+    simple_bullish_min_body_ratio: 0.5
+  prefilter:
+    batch_size: 20
+    blacklist:
+    - USDCUSDT
+    - BUSDUSDT
+    - TUSDUSDT
+    - USDPUSDT
+    - FDUSDUSDT
+    - DAIUSDT
+    - USDSUSDT
+    cache_ttl_hours: 1
+    check_orderbook: false
+    min_orderbook_depth: 10000
+    min_price_threshold: 0.01
+    orderbook_limit: 10
+    whitelist: []
+  risk_management:
+    max_sl_distance_pct: 5.0
+    max_sl_percent: 50.0
+    max_tp_ceiling_pct: 1.2
+    max_tp_percent: 20.0
+    min_sl_distance_absolute_pct: 0.5
+    min_sl_distance_pct: 0.5
+    min_tp_distance_pct: 1.5
+    min_tp_floor_pct: 0.97
+    min_tp_percent: 15.0
+    min_tp_sl_ratio: 1.0
+    rr_quality_bonus_threshold: 2.0
+    sl_safety_buffer_pct: 0.2
+    tp_atr_multiplier: 4.0
+    tp_safety_buffer_pct: 0.5
+  screen1_adx_threshold: 20.0
+  screen1_min_confidence: 0.65
+  screen1_timeframe: D1
+  screen2_min_confidence: 0.6
+  screen2_timeframe: H4
+  screen3_min_confidence: 0.7
+  screen3_timeframe: M15
+  signal_generation:
+    auto_expire_hours: 24
+    database_table: signals
+    default_leverage: 10
+    default_margin_mode: cross
+    default_position_size: 100
+    default_total_capital: 1000
+    divergence_confidence_bonus: 0.1
+    expiration_hours: 4
+    ma_bounce_tolerance_lower_pct: 0.5
+    ma_bounce_tolerance_upper_pct: 1.0
+    ma_crossover_lookback_candles: 5
+    max_confidence: 0.95
+    min_patterns_for_signal: 1
+    moderate_confidence_threshold: 0.65
+    pattern_confidence_bonus: 0.1
+    save_full_analysis_json: true
+    save_to_database: true
+    send_telegram_on_save: true
+    stochastic_confidence_bonus: 0.05
+    strong_confidence_threshold: 0.8
+  structure:
+    lookback_period: 6
+    ma_bounce_max_distance_pct: 2.0
+    ma_crossover_min_candles: 25
+    ma_touch_tolerance_pct: 0.5
+    min_confirmed_swings: 2
+    rsi_divergence_min_candles: 15
+  thresholds:
+    ma_bounce_confidence: 0.7
+    ma_crossover_confidence_base: 0.7
+    ma_distance_divisor: 10
+    min_candles_for_analysis: 80
+    min_data_points_for_zones: 10
+    min_h4_candles_for_analysis: 20
+    price_realism_check: 1.5
+    rsi_divergence_confidence: 0.8
+  trend_detection:
+    adx_boost_start: 15.0
+    bearish_conditions_threshold: 4
+    bullish_conditions_threshold: 4
+    volume_confirmation_threshold: 0.6
+  zones_config:
+    base_confidence: 0.6
+    default_zone_width_pct: 0.5
+    key_fibonacci_levels:
+    - '0.382'
+    - '0.500'
+    - '0.618'
+    level_break_tolerance_pct: 2.0
+    strong_with_volume_bonus: 0.1
+    strong_zones_bonus: 0.15
+    volume_confirmation_bonus: 0.2
+    zone_match_tolerance_pct: 1.0
+api:
+  api_key: ${BYBIT_API_KEY}
+  api_secret: ${BYBIT_API_SECRET}
+  cache:
+    ttl_seconds: 60
+  exchange: bybit
+  rate_limit: 100
+  recv_window: 5000
+  requests:
+    default_order_type: GTC
+    max_kline_limit: 1000
+    orderbook_limits:
+    - 1
+    - 5
+    - 10
+    - 20
+    - 50
+    - 100
+  retry_attempts: 3
+  retry_delay: 1
+  testnet: false
+  timeout: 30
+  use_public_api: true
+database:
+  backup:
+    auto_backup_interval_days: 7
+    backup_dir: backups
+    enabled: true
+    keep_last_n: 10
+  connection_pool:
+    max_overflow: 20
+    pool_pre_ping: true
+    pool_size: 10
+  data_retention:
+    closed_trades_days: 30
+    critical_levels:
+    - ERROR
+    - CRITICAL
+    error_logs_days: 30
+    other_logs_days: 7
+    signals_days: 30
+  engine: sqlite
+  path: data/trading_bot.db
+  performance:
+    enable_query_cache: true
+    optimize_on_startup: true
+    query_cache_ttl_seconds: 60
+  postgresql:
+    connect_timeout: 10
+    host: localhost
+    name: trading_bot
+    password: ''
+    port: 5432
+    ssl_mode: disable
+    user: postgres
+  query_limits:
+    pending_signals: 10
+    system_logs: 100
+    trades_by_symbol: 20
+  statistics:
+    balance_history_points: 100
+    starting_balance_statistics: 10000.0
+database_signals:
+  backup:
+    auto_backup_days: 7
+    backup_dir: data/backups/signals
+    enabled: true
+    keep_last_n: 10
+  enabled: false
+  engine: sqlite
+  path: data/trading_bot.db
+  performance:
+    cache_size: 10000
+    optimize_queries: true
+    vacuum_on_start: true
+  retention:
+    expired_days: 7
+    signals_days: 30
+    trades_days: 30
+  signals_table: signals
+  trades_table: trades
+mode: paper
+monitor:
+  auto_clear_screen: true
+  colors:
+    active: cyan
+    buy: green
+    closed: magenta
+    expired: white
+    pending: yellow
+    sell: red
+  enabled: true
+  log_file: logs/monitor.log
+  log_to_file: false
+  max_signals_display: 20
+  refresh_interval_seconds: 5
+  show_confidence: true
+  show_rr_ratio: true
+  show_trend_info: true
+  table_style: unicode
+paper_trading:
+  balance_management:
+    balance_history_limit: 100
+    commission_reserve_pct: 0.05
+  calculate_pnl: true
+  commission_rate: 0.001
+  enabled: true
+  log_all_signals: true
+  quantity_rounding:
+    min_quantity: 0.0001
+    price_1_100_decimals: 3
+    price_gt_100_decimals: 4
+    price_lt_1_decimals: 2
+  save_trades_to_db: true
+  send_notifications: true
+  simulate_commission: true
+  simulate_slippage: true
+  simulation:
+    default_fill_rate: 0.98
+    default_tp_multiplier: 1.02
+    fill_rate_variance: 0.03
+    min_fill_rate: 0.5
+    positive_variance_bias: 0.01
+    simulate_partial_fills: true
+  slippage_percentage: 0.001
+  starting_virtual_balance: 10000.0
+  telegram_alerts: true
+  track_performance: true
+  virtual_capital: 10000.0
+risk_management:
+  check_correlation: false
+  max_consecutive_losses: 3
+  max_correlation: 0.7
+  max_daily_loss_pct: 5.0
+  max_open_positions: 5
+  position_sizing_method: fixed_percentage
+  trailing_stop_distance_pct: 2.0
+  use_trailing_stop: false
+system:
+  api_retry_attempts: 3
+  api_retry_delay: 5
+  cache:
+    api_cache_ttl_seconds: 60
+    max_size: 100
+    ttl_hours: 1
+  database:
+    engine: sqlite
+    max_overflow: 20
+    path: data/trading_bot.db
+    pool_pre_ping: true
+    pool_size: 10
+    postgresql:
+      host: localhost
+      name: trading_bot
+      password: ''
+      port: 5432
+      user: postgres
+  log_file_path: logs/trading_bot.log
+  log_level: INFO
+  log_rotate_days: 7
+  log_to_file: true
+  max_concurrent_analysis: 5
+  monitoring:
+    cleanup_old_data_days: 30
+    health_check_interval: 300
+  rounding:
+    commission_buffer_pct: 5.0
+    min_quantity: 0.0001
+    price_1_100: 3
+    price_gt_100: 4
+    price_lt_1: 2
+telegram:
+  bot_token: 7972372871:AAFOa6ymCk0LHWFx7dv5PHGDw304M5XddGE
+  chat_id: '-1003117183231'
+  disable_notifications: false
+  enabled: true
+  formatting:
+    disable_preview: true
+    include_separators: true
+    truncate_long_messages: false
+    use_emojis: true
+  notifications:
+    daily_report: true
+    error_alerts: true
+    system_status: true
+    trade_close: true
+    trade_open: true
+    trade_update: true
+  parse_mode: Markdown
+  send_daily_reports: true
+  send_error_alerts: true
+  send_system_alerts: true
+  send_trade_alerts: true
+  timeout: 10
+trade_executor:
+  emergency_stop_enabled: true
+  execution_timeout_seconds: 30
+  fallback_mode: paper
+  log_level_execution: INFO
+  log_rejected_signals: true
+  log_trade_details: true
+  log_validation_details: false
+  max_concurrent_executions: 3
+  send_execution_notifications: true
+  validate_before_execution: true
+trading:
+  max_position_per_symbol: 0.1
+  max_risk_per_trade: 0.02
