@@ -1,4 +1,3 @@
-# analyzer/main.py (исправленные импорты в начале файла)
 #!/usr/bin/env python3
 """
 🚀 ГЛАВНЫЙ ЗАПУСКАЕМЫЙ ФАЙЛ ДЛЯ АНАЛИЗАТОРА СИГНАЛОВ
@@ -13,8 +12,10 @@ from typing import List, Dict, Any
 from datetime import datetime
 
 # ✅ ИСПРАВЛЕННЫЕ ИМПОРТЫ
-from core.api_client_bybit import BybitAPIClient
-from core.orchestrator import AnalysisOrchestrator
+from analyzer.core.api_client_bybit import BybitAPIClient
+from analyzer.core.orchestrator import AnalysisOrchestrator
+# ✅ ДОБАВЛЕННЫЕ ИМПОРТЫ ДЛЯ EVENTBUS
+from analyzer.core.event_bus import event_bus, EventType, Event
 
 # Настройка логирования
 logging.basicConfig(
@@ -48,26 +49,74 @@ class SignalGeneratorService:
             logger.error(f"❌ Ошибка загрузки конфига: {e}")
             return {}
 
-    # В методе initialize() класса SignalGeneratorService
+    # ✅ ТЕСТОВЫЙ ОБРАБОТЧИК СОБЫТИЙ С ДИАГНОСТИКОЙ
+    async def _on_signal_generated(self, event: Event):
+        """Тестовый обработчик события генерации сигнала"""
+        try:
+            data = event.data
+            signal_id = data.get("signal_id")
+
+            # ✅ ДИАГНОСТИКА В ОБРАБОТЧИКЕ
+            logger.info("=" * 60)
+            logger.info("🔍 [ОБРАБОТЧИК EVENT BUS] ПОЛУЧЕНЫ ДАННЫЕ:")
+            logger.info(f"   Тип события: {event.event_type.value}")
+            logger.info(f"   Источник: {event.source}")
+            logger.info(f"   Время: {event.timestamp}")
+            logger.info(f"   Все данные: {data}")
+            logger.info(f"   signal_id из данных: {signal_id}, тип: {type(signal_id)}")
+
+            if signal_id is None:
+                logger.warning("⚠️ [ОБРАБОТЧИК] ВНИМАНИЕ: Получен сигнал без ID!")
+                signal_id_display = "NO_ID"
+            else:
+                signal_id_display = signal_id
+                logger.info(f"✅ [ОБРАБОТЧИК] ID успешно получен: {signal_id}")
+
+            logger.info(f"🎯 [EVENT BUS] Получен новый сигнал!")
+            logger.info(f"   ID: {signal_id_display}")
+            logger.info(f"   {data.get('symbol')}: {data.get('signal_type')}")
+            logger.info(f"   Entry: {data.get('entry_price'):.4f}")
+            logger.info(f"   Confidence: {data.get('confidence'):.2f}")
+            logger.info(f"   R/R: {data.get('risk_reward_ratio'):.2f}:1")
+            logger.info("=" * 60)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка в обработчике событий: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
     async def initialize(self) -> bool:
         """Инициализация всех компонентов"""
         try:
             logger.info("🚀 Инициализация SignalGeneratorService...")
 
-            # 1. API клиент
+            # ✅ 1. ЗАПУСК EVENTBUS
+            logger.info("🔌 Запуск EventBus...")
+            await event_bus.start()
+
+            # Проверяем статус
+            stats = event_bus.get_stats()
+            logger.info(f"📊 EventBus статистика: {stats}")
+            logger.info("✅ EventBus запущен")
+
+            # ✅ 2. ПОДПИСКА НА СОБЫТИЯ (ДЛЯ ТЕСТА)
+            event_bus.subscribe(EventType.TRADING_SIGNAL_GENERATED, self._on_signal_generated)
+            logger.info("✅ Выполнена подписка на события сигналов")
+
+            # 3. API клиент
             self.api_client = BybitAPIClient(self.config)
             api_init = await self.api_client.initialize()
             if not api_init:
                 logger.error("❌ Не удалось инициализировать API клиент")
                 return False
 
-            # 2. Репозиторий сигналов
+            # 4. Репозиторий сигналов
             from analyzer.core.signal_repository import signal_repository
             repo_init = await signal_repository.initialize()
             if not repo_init:
                 logger.warning("⚠️ Не удалось инициализировать репозиторий сигналов, сигналы не будут сохраняться")
 
-            # 3. Оркестратор анализа
+            # 5. Оркестратор анализа
             self.orchestrator = AnalysisOrchestrator(self.api_client, self.config)
             orchestrator_init = await self.orchestrator.initialize()
             if not orchestrator_init:
@@ -79,6 +128,8 @@ class SignalGeneratorService:
 
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
 
     async def analyze_single_symbol(self, symbol: str) -> Dict[str, Any]:
@@ -210,18 +261,31 @@ class SignalGeneratorService:
                     await asyncio.sleep(wait_time)
                 else:
                     logger.warning(f"⚠️ Итерация заняла больше времени ({iteration_duration:.1f} сек) чем интервал!")
-                    await asyncio.sleep(1)  # Минимальная пауза
+                    await asyncio.sleep(1)
 
             except asyncio.CancelledError:
                 logger.info("🛑 Циклический мониторинг остановлен пользователем")
                 break
             except Exception as e:
                 logger.error(f"❌ Ошибка в циклическом мониторинге: {e}")
-                await asyncio.sleep(interval_seconds)  # Продолжаем при ошибке
+                await asyncio.sleep(interval_seconds)
 
     async def cleanup(self):
         """Очистка ресурсов"""
         logger.info("🧹 Очистка ресурсов...")
+
+        # ✅ КОРРЕКТНАЯ ОСТАНОВКА EVENTBUS
+        try:
+            # Отписываемся от событий
+            event_bus.unsubscribe(EventType.TRADING_SIGNAL_GENERATED, self._on_signal_generated)
+            logger.info("✅ Отписка от событий выполнена")
+
+            # Останавливаем EventBus
+            await event_bus.stop()
+            logger.info("✅ EventBus остановлен")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при остановке EventBus: {e}")
+
         if self.orchestrator:
             await self.orchestrator.cleanup()
         if self.api_client:
@@ -237,13 +301,13 @@ async def main():
         # Инициализация
         logger.info("🚀 ЗАПУСК БОТА С ЦИКЛИЧЕСКИМ МОНИТОРИНГОМ")
         logger.info("🎯 НАСТРОЙКИ: R/R 3:1+, SL 1%, TP 1.5%+, ЦИКЛ 60 сек")
+        logger.info("🔌 EventBus интегрирован для межмодульной коммуникации")
 
         if not await service.initialize():
             logger.error("❌ Не удалось инициализировать сервис")
             return
 
         # 🔥 ЗАПУСК ЦИКЛИЧЕСКОГО МОНИТОРИНГА КАЖДЫЕ 60 СЕКУНД
-        # Получаем интервал из конфига
         interval_seconds = service.config.get('analysis', {}).get('monitoring_interval_seconds', 60)
 
         logger.info(f"🔄 Запуск циклического мониторинга каждые {interval_seconds} секунд")

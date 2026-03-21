@@ -258,16 +258,9 @@ class AnalysisOrchestrator:
                             f"{analysis.screen3.signal_type} @ {analysis.screen3.entry_price:.2f} "
                             f"(R/R: {analysis.screen3.indicators.get('risk_reward_ratio', 0):.2f}:1)")
 
-                # Публикуем событие сигнала
-                asyncio.create_task(event_bus.publish(EventType.TRADING_SIGNAL_GENERATED, {
-                    "symbol": symbol,
-                    "signal_type": analysis.screen3.signal_type,
-                    "entry_price": analysis.screen3.entry_price,
-                    "stop_loss": analysis.screen3.stop_loss,
-                    "take_profit": analysis.screen3.take_profit,
-                    "confidence": analysis.overall_confidence,
-                    "analysis_duration": 0
-                }, source="orchestrator"))
+                # ⚠️ ПУБЛИКАЦИЯ СИГНАЛА УДАЛЕНА - теперь только репозиторий публикует!
+                # Событие будет опубликовано в signal_repository.py при сохранении в БД
+
             else:
                 logger.debug(f"❌ {symbol}: сигнал не найден (причина: не прошел экраны)")
 

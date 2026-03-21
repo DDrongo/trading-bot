@@ -1,9 +1,13 @@
-# analyzer/core/signal_repository.py - ДОПОЛНЕННАЯ ВЕРСИЯ
+# analyzer/core/signal_repository.py
 import aiosqlite
 import logging
 import os
 from typing import List, Dict, Optional, Any
 from pathlib import Path
+from datetime import datetime
+
+# Импорт EventBus
+from analyzer.core.event_bus import EventType, event_bus as global_event_bus
 
 logger = logging.getLogger("signal_repository")
 
@@ -13,6 +17,7 @@ class SignalRepository:
 
     def __init__(self, config=None):
         self.config = config or {}
+        self.event_bus = global_event_bus  # Сохраняем ссылку на event_bus
 
         # ВСЕГДА используем одну БД!
         project_root = Path(__file__).parent.parent.parent
@@ -21,33 +26,60 @@ class SignalRepository:
         logger.info(f"📊 SignalRepository использует: {self.db_path}")
 
     async def initialize(self) -> bool:
-        """Инициализация БД"""
+        """Инициализация БД с добавлением полей для сигналов (WATCH/LIMIT/INSTANT)"""
         try:
             # Создаем директорию если нет
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
             async with aiosqlite.connect(self.db_path) as conn:
-                # Таблица signals
-                await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS signals (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        symbol TEXT NOT NULL,
-                        strategy TEXT DEFAULT "three_screen",
-                        direction TEXT NOT NULL,
-                        status TEXT DEFAULT "PENDING",
-                        confidence REAL DEFAULT 0.0,
-                        entry_price REAL DEFAULT 0.0,
-                        stop_loss REAL DEFAULT 0.0,
-                        take_profit REAL DEFAULT 0.0,
-                        trend_direction TEXT,
-                        trend_strength TEXT,
-                        signal_strength TEXT,
-                        trigger_pattern TEXT,
-                        risk_reward_ratio REAL,
-                        risk_pct REAL,
-                        created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
+                # Проверяем существование таблицы
+                cursor = await conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='signals'"
+                )
+                table_exists = await cursor.fetchone()
+
+                if not table_exists:
+                    # Создаем таблицу с новыми полями
+                    await conn.execute("""
+                        CREATE TABLE IF NOT EXISTS signals (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            symbol TEXT NOT NULL,
+                            strategy TEXT DEFAULT "three_screen",
+                            direction TEXT NOT NULL,
+                            signal_subtype TEXT DEFAULT "LIMIT",
+                            status TEXT DEFAULT "PENDING",
+                            confidence REAL DEFAULT 0.0,
+                            entry_price REAL DEFAULT 0.0,
+                            stop_loss REAL DEFAULT 0.0,
+                            take_profit REAL DEFAULT 0.0,
+                            trend_direction TEXT,
+                            trend_strength TEXT,
+                            signal_strength TEXT,
+                            trigger_pattern TEXT,
+                            risk_reward_ratio REAL,
+                            risk_pct REAL,
+                            expiration_time TIMESTAMP,
+                            created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    logger.info("✅ Таблица signals создана с полями signal_subtype и expiration_time")
+                else:
+                    # Проверяем наличие поля signal_subtype
+                    cursor = await conn.execute("PRAGMA table_info(signals)")
+                    columns = await cursor.fetchall()
+                    column_names = [col[1] for col in columns]
+
+                    if 'signal_subtype' not in column_names:
+                        await conn.execute(
+                            "ALTER TABLE signals ADD COLUMN signal_subtype TEXT DEFAULT 'LIMIT'"
+                        )
+                        logger.info("✅ Добавлено поле signal_subtype в таблицу signals")
+
+                    if 'expiration_time' not in column_names:
+                        await conn.execute(
+                            "ALTER TABLE signals ADD COLUMN expiration_time TIMESTAMP"
+                        )
+                        logger.info("✅ Добавлено поле expiration_time в таблицу signals")
 
                 await conn.commit()
                 logger.info(f"✅ БД готова: {self.db_path}")
@@ -58,22 +90,31 @@ class SignalRepository:
             return False
 
     async def save_signal(self, analysis: Any) -> Optional[int]:
-        """Сохраняет сигнал в БД"""
+        """Сохраняет сигнал в БД с указанием подтипа (WATCH/LIMIT/INSTANT)"""
         try:
             if not hasattr(analysis, "screen3") or not analysis.screen3:
+                logger.warning("⚠️ Нет screen3 в анализе, сигнал не сохраняется")
                 return None
+
+            # Определяем подтип сигнала
+            signal_subtype = getattr(analysis.screen3, 'signal_subtype', 'LIMIT')
+            expiration_time = getattr(analysis.screen3, 'expiration_time', None)
+
+            # Форматируем expiration_time для SQLite
+            expiration_time_str = expiration_time.isoformat() if expiration_time else None
 
             async with aiosqlite.connect(self.db_path) as conn:
                 cursor = await conn.execute("""
                     INSERT INTO signals (
-                        symbol, direction, confidence, entry_price,
+                        symbol, direction, signal_subtype, confidence, entry_price,
                         stop_loss, take_profit, trend_direction,
                         trend_strength, signal_strength, trigger_pattern,
-                        risk_reward_ratio, risk_pct
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        risk_reward_ratio, risk_pct, expiration_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     analysis.symbol,
                     analysis.screen3.signal_type,
+                    signal_subtype,
                     analysis.overall_confidence,
                     analysis.screen3.entry_price,
                     analysis.screen3.stop_loss,
@@ -83,19 +124,47 @@ class SignalRepository:
                     getattr(analysis.screen3, "signal_strength", ""),
                     getattr(analysis.screen3, "trigger_pattern", ""),
                     analysis.screen3.indicators.get("risk_reward_ratio", 0),
-                    analysis.screen3.indicators.get("risk_pct", 0)
+                    analysis.screen3.indicators.get("risk_pct", 0),
+                    expiration_time_str
                 ))
 
                 await conn.commit()
-                signal_id = cursor.lastrowid
+                db_signal_id = cursor.lastrowid
 
-                logger.info(f"💾 Сигнал сохранен: {analysis.symbol} (ID: {signal_id})")
-                logger.info(f"   Entry: {analysis.screen3.entry_price:.6f}, SL: {analysis.screen3.stop_loss:.6f}")
+                logger.info(f"💾 Сигнал сохранен: {analysis.symbol} (ID: {db_signal_id}, тип: {signal_subtype})")
+                logger.info(f"   Истекает: {expiration_time_str or 'никогда'}")
 
-                return signal_id
+                # Публикация события
+                if db_signal_id and self.event_bus and self.event_bus._is_running:
+                    event_data = {
+                        'signal_id': db_signal_id,
+                        'symbol': analysis.symbol,
+                        'signal_type': analysis.screen3.signal_type,
+                        'signal_subtype': signal_subtype,
+                        'entry_price': analysis.screen3.entry_price,
+                        'stop_loss': analysis.screen3.stop_loss,
+                        'take_profit': analysis.screen3.take_profit,
+                        'confidence': analysis.overall_confidence,
+                        'risk_reward_ratio': analysis.screen3.indicators.get("risk_reward_ratio", 0),
+                        'expiration_time': expiration_time_str,
+                        'trend_direction': getattr(analysis.screen1, "trend_direction", ""),
+                        'trigger_pattern': getattr(analysis.screen3, "trigger_pattern", ""),
+                        'strategy': 'three_screen'
+                    }
+
+                    await self.event_bus.publish(
+                        event_type=EventType.TRADING_SIGNAL_GENERATED,
+                        data=event_data,
+                        source='signal_repository'
+                    )
+                    logger.info(f"📢 Событие опубликовано для сигнала #{db_signal_id} ({signal_subtype})")
+
+                return db_signal_id
 
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
 
     async def get_all_signals(self, limit: int = 100) -> List[Dict]:
@@ -107,26 +176,46 @@ class SignalRepository:
                     "SELECT * FROM signals ORDER BY created_time DESC LIMIT ?",
                     (limit,)
                 )
-                return [dict(row) for row in await cursor.fetchall()]
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
         except Exception as e:
             logger.error(f"❌ Ошибка получения: {e}")
             return []
 
-    # ДОБАВЛЕННЫЕ МЕТОДЫ ДЛЯ СОВМЕСТИМОСТИ С МОНИТОРОМ
-    async def get_signals(self, limit: int = 50) -> List[Dict]:
-        """Получение сигналов (аналогично get_all_signals)"""
-        return await self.get_all_signals(limit)
+    async def get_signals(self, limit: int = 50, signal_subtype: Optional[str] = None) -> List[Dict]:
+        """
+        Получение сигналов с возможностью фильтрации по подтипу (WATCH/LIMIT/INSTANT)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+
+                if signal_subtype:
+                    cursor = await conn.execute(
+                        "SELECT * FROM signals WHERE signal_subtype = ? ORDER BY created_time DESC LIMIT ?",
+                        (signal_subtype, limit)
+                    )
+                else:
+                    cursor = await conn.execute(
+                        "SELECT * FROM signals ORDER BY created_time DESC LIMIT ?",
+                        (limit,)
+                    )
+
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения: {e}")
+            return []
 
     async def get_signals_with_trades(self, limit: int = 20) -> List[Dict]:
         """Получение сигналов с информацией о трейдах (упрощенная версия)"""
         try:
             signals = await self.get_all_signals(limit)
-            # Добавляем информацию о трейдах (пока заглушка)
             for signal in signals:
                 signal['active_trades'] = 0
                 signal['trade_count'] = 0
                 signal['current_price'] = signal.get('entry_price', 0)
-                signal['leverage'] = 10  # По умолчанию
+                signal['leverage'] = 10
             return signals
         except Exception as e:
             logger.error(f"❌ Ошибка получения сигналов с трейдами: {e}")
@@ -147,6 +236,28 @@ class SignalRepository:
             logger.error(f"❌ Ошибка получения сигнала по ID: {e}")
             return None
 
+    async def get_active_signals(self) -> List[Dict]:
+        """
+        Получение активных (не истекших) сигналов
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                current_time = datetime.now().isoformat()
+
+                cursor = await conn.execute("""
+                    SELECT * FROM signals 
+                    WHERE status IN ('PENDING', 'ACTIVE')
+                    AND (expiration_time IS NULL OR expiration_time > ?)
+                    ORDER BY created_time DESC
+                """, (current_time,))
+
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения активных сигналов: {e}")
+            return []
+
     async def get_database_stats(self) -> Dict[str, Any]:
         """Получение статистики БД"""
         try:
@@ -155,39 +266,46 @@ class SignalRepository:
 
                 # Общее количество сигналов
                 cursor = await conn.execute("SELECT COUNT(*) as total FROM signals")
-                total_result = await cursor.fetchone()
-                total_signals = dict(total_result)['total'] if total_result else 0
+                row = await cursor.fetchone()
+                total_signals = row['total'] if row else 0
 
-                # Активные сигналы
-                cursor = await conn.execute(
-                    "SELECT COUNT(*) as active FROM signals WHERE status IN ('PENDING', 'ACTIVE')"
-                )
-                active_result = await cursor.fetchone()
-                active_signals = dict(active_result)['active'] if active_result else 0
+                # Активные сигналы (с учетом expiration_time)
+                current_time = datetime.now().isoformat()
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) as active FROM signals 
+                    WHERE status IN ('PENDING', 'ACTIVE')
+                    AND (expiration_time IS NULL OR expiration_time > ?)
+                """, (current_time,))
+                row = await cursor.fetchone()
+                active_signals = row['active'] if row else 0
 
                 # Three Screen сигналы
                 cursor = await conn.execute(
                     "SELECT COUNT(*) as three_screen FROM signals WHERE strategy = 'three_screen'"
                 )
-                three_screen_result = await cursor.fetchone()
-                three_screen_signals = dict(three_screen_result)['three_screen'] if three_screen_result else 0
+                row = await cursor.fetchone()
+                three_screen_signals = row['three_screen'] if row else 0
 
                 # BUY сигналы
                 cursor = await conn.execute(
                     "SELECT COUNT(*) as buy_count FROM signals WHERE direction = 'BUY'"
                 )
-                buy_result = await cursor.fetchone()
-                buy_signals = dict(buy_result)['buy_count'] if buy_result else 0
+                row = await cursor.fetchone()
+                buy_signals = row['buy_count'] if row else 0
 
                 # SELL сигналы
                 cursor = await conn.execute(
                     "SELECT COUNT(*) as sell_count FROM signals WHERE direction = 'SELL'"
                 )
-                sell_result = await cursor.fetchone()
-                sell_signals = dict(sell_result)['sell_count'] if sell_result else 0
+                row = await cursor.fetchone()
+                sell_signals = row['sell_count'] if row else 0
 
-                # Общий PnL (заглушка)
-                total_pnl = 0
+                # Статистика по подтипам сигналов
+                cursor = await conn.execute(
+                    "SELECT signal_subtype, COUNT(*) as count FROM signals GROUP BY signal_subtype"
+                )
+                rows = await cursor.fetchall()
+                subtypes_stats = {row['signal_subtype']: row['count'] for row in rows}
 
                 return {
                     'total_signals': total_signals,
@@ -195,10 +313,12 @@ class SignalRepository:
                     'three_screen_signals': three_screen_signals,
                     'buy_signals': buy_signals,
                     'sell_signals': sell_signals,
+                    'subtypes_stats': subtypes_stats,
                     'active_trades': 0,
                     'closed_trades': 0,
-                    'total_pnl': total_pnl
+                    'total_pnl': 0
                 }
+
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return {
@@ -207,6 +327,7 @@ class SignalRepository:
                 'three_screen_signals': 0,
                 'buy_signals': 0,
                 'sell_signals': 0,
+                'subtypes_stats': {},
                 'active_trades': 0,
                 'closed_trades': 0,
                 'total_pnl': 0
@@ -238,10 +359,41 @@ class SignalRepository:
                     ORDER BY created_time DESC
                 """
                 cursor = await conn.execute(query, (f'-{hours} hours',))
-                return [dict(row) for row in await cursor.fetchall()]
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
         except Exception as e:
             logger.error(f"❌ Ошибка получения недавних сигналов: {e}")
             return []
+
+    async def expire_old_signals(self) -> int:
+        """
+        Помечает истекшие сигналы как EXPIRED
+        Returns:
+            Количество помеченных сигналов
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                current_time = datetime.now().isoformat()
+
+                cursor = await conn.execute("""
+                    UPDATE signals 
+                    SET status = 'EXPIRED'
+                    WHERE status IN ('PENDING', 'ACTIVE')
+                    AND expiration_time IS NOT NULL
+                    AND expiration_time <= ?
+                """, (current_time,))
+
+                await conn.commit()
+                expired_count = cursor.rowcount
+
+                if expired_count > 0:
+                    logger.info(f"⏰ Помечено {expired_count} истекших сигналов как EXPIRED")
+
+                return expired_count
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления истекших сигналов: {e}")
+            return 0
 
 
 # Глобальный экземпляр

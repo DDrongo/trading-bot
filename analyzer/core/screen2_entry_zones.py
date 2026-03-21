@@ -6,6 +6,7 @@
 import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 
 logger = logging.getLogger('screen2_analyzer')
 
@@ -18,6 +19,7 @@ class Screen2Result:
     invalidated_zones: List[float] = field(default_factory=list)
     fib_levels: Dict[str, float] = field(default_factory=dict)
     volume_confirmation: bool = False
+    watch_signal: Optional[Dict] = None  # НОВОЕ для Фазы 1.2
     passed: bool = False
     confidence: float = 0.0
 
@@ -28,6 +30,7 @@ class Screen2Result:
             "invalidated_zones": self.invalidated_zones,
             "fib_levels": self.fib_levels,
             "volume_confirmation": self.volume_confirmation,
+            "watch_signal": self.watch_signal,
             "passed": self.passed,
             "confidence": self.confidence
         }
@@ -71,13 +74,22 @@ class Screen2EntryZonesAnalyzer:
         # Минимальные требования для анализа
         self.min_data_points = thresholds_config.get('min_data_points_for_zones', 10)
 
+        # НОВОЕ для Фазы 1.2: Параметры WATCH сигналов
+        signal_types_config = analysis_config.get('signal_types', {})
+        watch_config = signal_types_config.get('watch', {})
+        self.watch_enabled = watch_config.get('enabled', True)
+        self.watch_conditions_required = watch_config.get('conditions_required', 4)
+        self.watch_total_conditions = watch_config.get('total_conditions', 5)
+
         logger.info(f"✅ Screen2EntryZonesAnalyzer инициализирован с параметрами из конфига")
         logger.info(f"   Уровни Фибоначчи: {self.fibonacci_levels}")
         logger.info(f"   Ширина зоны по умолчанию: {self.default_zone_width}%")
         logger.info(f"   Порог спайка объема: {self.volume_spike_threshold}x")
+        logger.info(f"   WATCH сигналы: {'включены' if self.watch_enabled else 'выключены'}")
+        logger.info(f"   Требуется условий: {self.watch_conditions_required}/{self.watch_total_conditions}")
 
     def analyze_entry_zones(self, symbol: str, h4_klines: List, h1_klines: List,
-                            trend_direction: str) -> Screen2Result:
+                            trend_direction: str, screen1_result: Any = None) -> Screen2Result:
         """Основной метод анализа зон входа"""
         logger.info(f"🎯 {symbol} - Поиск зон входа H4/H1")
         result = Screen2Result()
@@ -108,7 +120,7 @@ class Screen2EntryZonesAnalyzer:
                 fib_levels, support_levels, resistance_levels, trend_direction
             )
 
-            # Анализ объема в зонах (FIXED: теперь анализируем объём в зонах, а не только последнюю свечу)
+            # Анализ объема в зонах
             volume_confirmation = self._analyze_volume_at_zones_h1(h1_klines, entry_zones, current_h4_close)
 
             # Выбор лучшей зоны
@@ -121,6 +133,21 @@ class Screen2EntryZonesAnalyzer:
             invalidated_zones = self._update_invalidated_zones(
                 current_h4_close, support_levels, resistance_levels, trend_direction
             )
+
+            # НОВОЕ для Фазы 1.2: Генерация WATCH сигнала, если включено
+            if self.watch_enabled and screen1_result:
+                watch_signal = self._generate_watch_signal(
+                    trend_direction=trend_direction,
+                    entry_zones=entry_zones,
+                    volume_confirmation=volume_confirmation,
+                    screen1_result=screen1_result,
+                    h4_klines=h4_klines,
+                    h1_klines=h1_klines,
+                    current_price=current_h4_close
+                )
+                if watch_signal:
+                    result.watch_signal = watch_signal
+                    logger.info(f"🔔 Сгенерирован WATCH сигнал: {watch_signal}")
 
             # Формируем результат
             result.entry_zones = entry_zones
@@ -265,7 +292,7 @@ class Screen2EntryZonesAnalyzer:
                     if trend_direction == "BULL":
                         # Для бычьего тренда ищем зоны входа у уровни Фибо (откат в лонг)
                         for support in support_levels:
-                            tolerance = self.zone_match_tolerance / 100  # Конвертируем проценты в десятичные
+                            tolerance = self.zone_match_tolerance / 100
                             if abs(fib_price - support) / support < tolerance:
                                 zone_strength = "STRONG"
                                 volume_confirmation = True
@@ -276,7 +303,7 @@ class Screen2EntryZonesAnalyzer:
                     else:  # BEAR
                         # Для медвежьего тренда ищем зоны входа у уровни Фибо (отскок в шорт)
                         for resistance in resistance_levels:
-                            tolerance = self.zone_match_tolerance / 100  # Конвертируем проценты в десятичные
+                            tolerance = self.zone_match_tolerance / 100
                             if abs(fib_price - resistance) / resistance < tolerance:
                                 zone_strength = "STRONG"
                                 volume_confirmation = True
@@ -303,7 +330,7 @@ class Screen2EntryZonesAnalyzer:
             return []
 
     def _analyze_volume_at_zones_h1(self, h1_klines: List, entry_zones: List[Dict], current_price: float) -> bool:
-        """Анализ объема в зонах входа H1 (FIXED: анализируем объём именно в зонах)"""
+        """Анализ объема в зонах входа H1"""
         logger.debug("Анализ объема в зонах входа H1")
 
         try:
@@ -466,17 +493,17 @@ class Screen2EntryZonesAnalyzer:
         logger.debug(f"Обновление пробитых уровней, тренд: {trend_direction}")
         invalidated = []
 
-        tolerance = self.level_break_tolerance / 100  # Конвертируем проценты в десятичные
+        tolerance = self.level_break_tolerance / 100
 
         if trend_direction == "BULL":
             for level in support_levels:
-                if current_price < level * (1 - tolerance):  # Пробитие вниз
+                if current_price < level * (1 - tolerance):
                     invalidated.append(level)
                     logger.info(f"❌ Уровень поддержки {level:.2f} пробит вниз (допуск: {tolerance * 100:.1f}%)")
 
         elif trend_direction == "BEAR":
             for level in resistance_levels:
-                if current_price > level * (1 + tolerance):  # Пробитие вверх
+                if current_price > level * (1 + tolerance):
                     invalidated.append(level)
                     logger.info(f"❌ Уровень сопротивления {level:.2f} пробит вверх (допуск: {tolerance * 100:.1f}%)")
 
@@ -525,6 +552,123 @@ class Screen2EntryZonesAnalyzer:
 
         except Exception as e:
             logger.error(f"Ошибка анализа объема: {e}")
+            return False
+
+    # ========== НОВЫЕ МЕТОДЫ ДЛЯ ФАЗЫ 1.2 ==========
+
+    def _generate_watch_signal(self, trend_direction: str, entry_zones: List[Dict],
+                               volume_confirmation: bool, screen1_result: Any,
+                               h4_klines: List, h1_klines: List, current_price: float) -> Optional[Dict]:
+        """
+        Генерация WATCH сигнала при выполнении 4 из 5 условий
+        """
+        logger.debug("🔍 Проверка условий для WATCH сигнала")
+
+        # Условие 1: Тренд D1 (BULL/BEAR) - уже в trend_direction
+        condition1_met = trend_direction in ["BULL", "BEAR"]
+
+        # Условие 2: Цена в зоне Фибоначчи
+        condition2_met = len(entry_zones) > 0
+
+        # Условие 3: Подтверждение объёмом (спайк > 1.5x среднего)
+        condition3_met = volume_confirmation
+
+        # Условие 4: Структура HH/HL (для BULL) или LH/LL (для BEAR)
+        condition4_met = False
+        if screen1_result and hasattr(screen1_result, 'indicators'):
+            if trend_direction == "BULL":
+                condition4_met = screen1_result.indicators.get('has_hh_structure', False)
+            elif trend_direction == "BEAR":
+                condition4_met = screen1_result.indicators.get('has_ll_structure', False)
+
+        # Условие 5: Моментум (стохастик или RSI) - рассчитываем на H4
+        condition5_met = self._check_momentum_h4(h4_klines, trend_direction)
+
+        # Подсчет выполненных условий
+        conditions_met = sum([
+            condition1_met,
+            condition2_met,
+            condition3_met,
+            condition4_met,
+            condition5_met
+        ])
+
+        logger.info(f"📊 WATCH условия: {conditions_met}/{self.watch_total_conditions}")
+        logger.info(f"   1. Тренд D1: {condition1_met}")
+        logger.info(f"   2. Зона Фибо: {condition2_met}")
+        logger.info(f"   3. Объем: {condition3_met}")
+        logger.info(f"   4. Структура HH/HL: {condition4_met}")
+        logger.info(f"   5. Моментум: {condition5_met}")
+
+        if conditions_met >= self.watch_conditions_required:
+            # Находим лучшую зону для WATCH
+            best_zone = self._select_best_zone(entry_zones)
+
+            watch_signal = {
+                "signal_type": "WATCH",
+                "direction": "BUY" if trend_direction == "BULL" else "SELL",
+                "entry_zone": best_zone,
+                "conditions_met": conditions_met,
+                "total_conditions": self.watch_total_conditions,
+                "confidence": conditions_met / self.watch_total_conditions,
+                "timestamp": datetime.now().isoformat(),
+                "details": {
+                    "trend_confirmed": condition1_met,
+                    "fib_zone": condition2_met,
+                    "volume_confirmation": condition3_met,
+                    "structure_confirmed": condition4_met,
+                    "momentum_confirmed": condition5_met
+                }
+            }
+            logger.info(f"✅ WATCH сигнал сгенерирован! {conditions_met}/{self.watch_total_conditions} условий")
+            return watch_signal
+
+        logger.debug(f"❌ Недостаточно условий для WATCH: {conditions_met}/{self.watch_conditions_required}")
+        return None
+
+    def _check_momentum_h4(self, h4_klines: List, trend_direction: str) -> bool:
+        """
+        Проверка моментума на H4 (стохастик или RSI)
+        """
+        try:
+            if len(h4_klines) < 20:
+                return False
+
+            closes = [float(k[4]) for k in h4_klines[-20:]]
+            highs = [float(k[2]) for k in h4_klines[-20:]]
+            lows = [float(k[3]) for k in h4_klines[-20:]]
+
+            # Простой расчет RSI
+            gains = []
+            losses = []
+            for i in range(1, len(closes)):
+                change = closes[i] - closes[i-1]
+                if change > 0:
+                    gains.append(change)
+                    losses.append(0)
+                else:
+                    gains.append(0)
+                    losses.append(abs(change))
+
+            avg_gain = sum(gains[-14:]) / min(14, len(gains)) if gains else 0
+            avg_loss = sum(losses[-14:]) / min(14, len(losses)) if losses else 0
+
+            if avg_loss == 0:
+                rsi = 100 if avg_gain > 0 else 50
+            else:
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+
+            # Проверяем условие моментума в направлении тренда
+            if trend_direction == "BULL":
+                return rsi > 50 and rsi < 80
+            elif trend_direction == "BEAR":
+                return rsi < 50 and rsi > 20
+            else:
+                return False
+
+        except Exception as e:
+            logger.error(f"Ошибка проверки моментума: {e}")
             return False
 
 

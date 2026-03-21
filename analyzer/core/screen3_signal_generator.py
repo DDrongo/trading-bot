@@ -31,6 +31,7 @@ class PatternType(Enum):
 class Screen3Result:
     """Результат анализа 3-го экрана (сигналы)"""
     signal_type: str = ""
+    signal_subtype: str = "LIMIT"  # НОВОЕ для Фазы 1.2
     entry_price: float = 0.0
     stop_loss: float = 0.0
     take_profit: float = 0.0
@@ -44,6 +45,7 @@ class Screen3Result:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "signal_type": self.signal_type,
+            "signal_subtype": self.signal_subtype,
             "entry_price": self.entry_price,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
@@ -66,7 +68,7 @@ class Screen3SignalGenerator:
         analysis_config = self.config.get('analysis', {})
 
         # Получаем параметры из конфига с значениями по умолчанию
-        self.min_rr_ratio = analysis_config.get('min_rr_ratio', 3.0)  # 🔥 ИСПРАВЛЕНО: 3.0 вместо 1.2
+        self.min_rr_ratio = analysis_config.get('min_rr_ratio', 3.0)
         self.max_risk_pct = analysis_config.get('max_risk_per_trade_pct', 0.02) / 100
         self.max_sl_distance_pct = analysis_config.get('risk_management', {}).get('max_sl_distance_pct', 5.0) / 100
         self.max_entry_distance_pct = analysis_config.get('max_entry_distance_pct', 10.0)
@@ -88,11 +90,10 @@ class Screen3SignalGenerator:
 
         # Параметры рисков
         risk_management_config = analysis_config.get('risk_management', {})
-        self.min_sl_distance_absolute_pct = risk_management_config.get('min_sl_distance_absolute_pct',
-                                                                       0.5)  # 🔥 0.5% вместо 0.002
-        self.sl_safety_buffer_pct = risk_management_config.get('sl_safety_buffer_pct', 0.1)  # 🔥 0.1% вместо 0.001
-        self.tp_safety_buffer_pct = risk_management_config.get('tp_safety_buffer_pct', 0.5)  # 🔥 0.5% вместо 0.005
-        self.tp_atr_multiplier = risk_management_config.get('tp_atr_multiplier', 4.0)  # 🔥 4.0 вместо 2.5
+        self.min_sl_distance_absolute_pct = risk_management_config.get('min_sl_distance_absolute_pct', 0.5)
+        self.sl_safety_buffer_pct = risk_management_config.get('sl_safety_buffer_pct', 0.1)
+        self.tp_safety_buffer_pct = risk_management_config.get('tp_safety_buffer_pct', 0.5)
+        self.tp_atr_multiplier = risk_management_config.get('tp_atr_multiplier', 4.0)
         self.min_tp_floor_pct = risk_management_config.get('min_tp_floor_pct', 0.97)
         self.max_tp_ceiling_pct = risk_management_config.get('max_tp_ceiling_pct', 1.20)
         self.rr_quality_bonus_threshold = risk_management_config.get('rr_quality_bonus_threshold', 2.0)
@@ -135,7 +136,19 @@ class Screen3SignalGenerator:
         self.ma_bounce_tolerance_upper_pct = signal_config.get('ma_bounce_tolerance_upper_pct', 1.0)
         self.ma_bounce_tolerance_lower_pct = signal_config.get('ma_bounce_tolerance_lower_pct', 0.5)
 
+        # НОВОЕ для Фазы 1.2: Параметры для разных типов сигналов
+        signal_types_config = analysis_config.get('signal_types', {})
+        limit_config = signal_types_config.get('limit', {})
+        self.limit_min_rr = limit_config.get('min_rr_ratio', 3.0)
+        self.limit_expiration_hours = limit_config.get('expiration_hours', 24)
+
+        instant_config = signal_types_config.get('instant', {})
+        self.instant_min_rr = instant_config.get('min_rr_ratio', 2.0)
+        self.instant_expiration_hours = instant_config.get('expiration_hours', 3)
+
         logger.info(f"✅ Screen3SignalGenerator настроен. Min R/R: {self.min_rr_ratio}:1")
+        logger.info(f"   LIMIT: R/R ≥ {self.limit_min_rr}:1, {self.limit_expiration_hours}ч")
+        logger.info(f"   INSTANT: R/R ≥ {self.instant_min_rr}:1, {self.instant_expiration_hours}ч")
 
     def generate_signal(self, symbol: str, m15_klines: List, m5_klines: List,
                         screen1_result: Any, screen2_result: Any) -> Screen3Result:
@@ -180,8 +193,22 @@ class Screen3SignalGenerator:
                 result.signal_strength = signal_data['strength']
                 result.trigger_pattern = signal_data['pattern']
                 result.confidence = signal_data['confidence']
-                result.expiration_time = datetime.now() + timedelta(hours=self.expiration_hours)
                 result.passed = True
+
+                # НОВОЕ для Фазы 1.2: Определяем подтип сигнала (LIMIT или INSTANT)
+                rr_ratio = signal_data.get('risk_reward_ratio', 0)
+                if rr_ratio >= self.limit_min_rr:
+                    result.signal_subtype = "LIMIT"
+                    result.expiration_time = datetime.now() + timedelta(hours=self.limit_expiration_hours)
+                    logger.info(f"📌 Сигнал типа LIMIT (R/R {rr_ratio:.2f}:1 ≥ {self.limit_min_rr}:1)")
+                elif rr_ratio >= self.instant_min_rr:
+                    result.signal_subtype = "INSTANT"
+                    result.expiration_time = datetime.now() + timedelta(hours=self.instant_expiration_hours)
+                    logger.info(f"⚡ Сигнал типа INSTANT (R/R {rr_ratio:.2f}:1 ≥ {self.instant_min_rr}:1)")
+                else:
+                    logger.warning(f"❌ R/R {rr_ratio:.2f}:1 ниже минимального порога INSTANT {self.instant_min_rr}:1")
+                    result.passed = False
+                    return result
 
                 result.indicators = {
                     "stochastic_k": stochastic_data.get("k_line", 50),
@@ -235,123 +262,99 @@ class Screen3SignalGenerator:
             logger.error(f"❌ Ошибка проверки цены {symbol}: {e}")
             return True
 
-    # core/screen3_signal_generator.py - ИСПРАВЛЕННЫЙ МЕТОД _calculate_stop_loss
-
     def _calculate_stop_loss(self, entry_price: float, signal_type: str, atr: float,
                              resistance_level: Optional[float] = None,
                              support_level: Optional[float] = None) -> float:
-        """✅ ПЕРЕПРОВЕРЕНО И ИСПРАВЛЕНО: Расчет Stop Loss с правильной логикой"""
+        """Расчет Stop Loss с правильной логикой"""
 
         logger.info(f"🔍 РАСЧЕТ STOP LOSS для {signal_type} @ {entry_price:.6f}, ATR={atr:.6f}")
 
-        # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем, что ATR не нулевой
         if atr == 0:
             logger.warning(f"⚠️ ATR = 0, используем минимальное расстояние")
-            atr = entry_price * 0.001  # 0.1% от цены в качестве минимального ATR
+            atr = entry_price * 0.001
 
         # Базовый стоп на основе ATR (1.5 ATR)
         if signal_type == "SELL":
-            # Для SELL: stop должен быть ВЫШЕ entry_price
             stop_by_atr = entry_price + (atr * 1.5)
             logger.debug(f"  SELL: базовый стоп по ATR: {stop_by_atr:.6f} (entry + {atr * 1.5:.6f})")
-        else:  # BUY
-            # Для BUY: stop должен быть НИЖЕ entry_price
+        else:
             stop_by_atr = entry_price - (atr * 1.5)
             logger.debug(f"  BUY: базовый стоп по ATR: {stop_by_atr:.6f} (entry - {atr * 1.5:.6f})")
 
-        # ✅ ИСПРАВЛЕНО: Проверка минимального расстояния
-        min_distance_pct = self.min_sl_distance_absolute_pct / 100  # Конвертируем проценты в десятичные
+        min_distance_pct = self.min_sl_distance_absolute_pct / 100
         min_distance = entry_price * min_distance_pct
 
         logger.debug(f"  Минимальное расстояние: {min_distance:.6f} ({min_distance_pct * 100:.3f}%)")
 
         if signal_type == "SELL":
-            # Для SELL проверяем, что стоп достаточно выше entry
             if stop_by_atr <= entry_price + min_distance:
-                # Увеличиваем стоп до минимального расстояния
                 stop_by_atr = entry_price + min_distance
                 logger.warning(f"⚠️ SELL: стоп слишком близко, увеличиваем до {stop_by_atr:.6f}")
 
-            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Гарантируем, что стоп ВЫШЕ entry
             if stop_by_atr <= entry_price:
                 stop_by_atr = entry_price * (1 + self.sl_safety_buffer_pct / 100)
                 logger.warning(f"⚠️ SELL: стоп ниже entry, исправляем на {stop_by_atr:.6f}")
 
-        else:  # BUY
-            # Для BUY проверяем, что стоп достаточно ниже entry
+        else:
             if stop_by_atr >= entry_price - min_distance:
-                # Увеличиваем стоп до минимального расстояния
                 stop_by_atr = entry_price - min_distance
                 logger.warning(f"⚠️ BUY: стоп слишком близко, увеличиваем до {stop_by_atr:.6f}")
 
-            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Гарантируем, что стоп НИЖЕ entry
             if stop_by_atr >= entry_price:
                 stop_by_atr = entry_price * (1 - self.sl_safety_buffer_pct / 100)
                 logger.warning(f"⚠️ BUY: стоп выше entry, исправляем на {stop_by_atr:.6f}")
 
-        # Максимально допустимый стоп (по проценту риска из конфига)
         max_risk_distance = entry_price * self.max_risk_pct
         logger.debug(f"  Максимальный риск: {max_risk_distance:.6f} ({self.max_risk_pct * 100:.2f}%)")
 
-        # Собираем кандидатов
         candidates = [stop_by_atr]
 
         if signal_type == "SELL":
             max_stop = entry_price + max_risk_distance
             candidates.append(max_stop)
 
-            # Добавляем уровневый стоп по сопротивлению если он в пределах
             if resistance_level and resistance_level > entry_price:
                 candidates.append(resistance_level)
                 logger.debug(f"  Кандидат: уровневый стоп по сопротивлению: {resistance_level:.6f}")
-        else:  # BUY
+        else:
             max_stop = entry_price - max_risk_distance
             candidates.append(max_stop)
 
-            # Добавляем уровневый стоп по поддержке если он в пределах
             if support_level and support_level < entry_price:
                 candidates.append(support_level)
                 logger.debug(f"  Кандидат: уровневый стоп по поддержке: {support_level:.6f}")
 
-        # Выбираем оптимальный стоп
         if signal_type == "SELL":
-            stop_loss = min(candidates)  # Берем самый БЛИЗКИЙ стоп (самый безопасный)
-        else:  # BUY
-            stop_loss = max(candidates)  # Берем самый БЛИЗКИЙ стоп (самый безопасный)
+            stop_loss = min(candidates)
+        else:
+            stop_loss = max(candidates)
 
         logger.debug(f"  Выбран стоп из кандидатов {[f'{c:.6f}' for c in candidates]}: {stop_loss:.6f}")
 
-        # Фиксируем максимальное расстояние (из конфига)
         if signal_type == "SELL":
-            # Максимальный допустимый стоп (чтобы не был слишком далеко)
             max_stop_allowed = entry_price * (1 + self.max_sl_distance_pct)
             min_stop_required = entry_price * (1 + self.sl_safety_buffer_pct / 100)
 
             stop_loss = max(min(stop_loss, max_stop_allowed), min_stop_required)
             logger.debug(f"  Корректировка SELL стопа: min={min_stop_required:.6f}, max={max_stop_allowed:.6f}")
-        else:  # BUY
-            # Максимальный допустимый стоп (чтобы не был слишком далеко)
+        else:
             min_stop_allowed = entry_price * (1 - self.max_sl_distance_pct)
             max_stop_required = entry_price * (1 - self.sl_safety_buffer_pct / 100)
 
             stop_loss = min(max(stop_loss, min_stop_allowed), max_stop_required)
             logger.debug(f"  Корректировка BUY стопа: min={min_stop_allowed:.6f}, max={max_stop_required:.6f}")
 
-        # ✅ ФИНАЛЬНАЯ ПРОВЕРКА: стоп должен быть правильным для типа сигнала
-        distance_pct = abs((stop_loss - entry_price) / entry_price * 100)
-
         if signal_type == "SELL" and stop_loss <= entry_price:
             logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: SELL стоп {stop_loss:.6f} <= entry {entry_price:.6f}")
-            # Аварийная корректировка
-            stop_loss = entry_price * (1.01)  # +1% как минимальный стоп
+            stop_loss = entry_price * (1.01)
             logger.warning(f"  Аварийная корректировка SELL стопа: {stop_loss:.6f}")
 
         elif signal_type == "BUY" and stop_loss >= entry_price:
             logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: BUY стоп {stop_loss:.6f} >= entry {entry_price:.6f}")
-            # Аварийная корректировка
-            stop_loss = entry_price * (0.99)  # -1% как минимальный стоп
+            stop_loss = entry_price * (0.99)
             logger.warning(f"  Аварийная корректировка BUY стопа: {stop_loss:.6f}")
 
+        distance_pct = abs((stop_loss - entry_price) / entry_price * 100)
         logger.info(f"✅ Stop Loss для {signal_type}: {stop_loss:.6f} "
                     f"(расстояние: {distance_pct:.3f}%, entry: {entry_price:.6f})")
 
@@ -359,127 +362,98 @@ class Screen3SignalGenerator:
 
     def _calculate_take_profit(self, entry_price: float, stop_loss: float,
                                signal_type: str, atr: float) -> float:
-        """✅ ИСПРАВЛЕНО: Расчет Take Profit с ПРАВИЛЬНЫМ расчетом R/R и защитой от ошибок"""
+        """Расчет Take Profit с правильным расчетом R/R"""
 
         logger.info(f"🔍 РАСЧЕТ TP для {signal_type} @ {entry_price:.6f}, SL={stop_loss:.6f}, ATR={atr:.6f}")
 
-        # ✅ КРИТИЧЕСКАЯ ПРОВЕРКА 1: стоп не должен быть равен entry
-        if abs(stop_loss - entry_price) < entry_price * 0.00001:  # Разница меньше 0.001%
+        if abs(stop_loss - entry_price) < entry_price * 0.00001:
             logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: стоп слишком близко к entry!")
-            logger.error(
-                f"   Entry: {entry_price:.6f}, Stop: {stop_loss:.6f}, Разница: {abs(stop_loss - entry_price):.6f}")
-
-            # Аварийная корректировка в зависимости от типа сигнала
             if signal_type == "SELL":
-                stop_loss = entry_price * (1 + 0.005)  # +0.5% для SELL
+                stop_loss = entry_price * (1 + 0.005)
                 logger.warning(f"   Аварийная корректировка SELL стопа: {stop_loss:.6f} (+0.5%)")
-            else:  # BUY
-                stop_loss = entry_price * (1 - 0.005)  # -0.5% для BUY
+            else:
+                stop_loss = entry_price * (1 - 0.005)
                 logger.warning(f"   Аварийная корректировка BUY стопа: {stop_loss:.6f} (-0.5%)")
 
-        # ✅ КРИТИЧЕСКАЯ ПРОВЕРКА 2: правильное направление стопа
         if signal_type == "SELL" and stop_loss <= entry_price:
             logger.error(f"❌ НЕПРАВИЛЬНЫЙ SELL СТОП: {stop_loss:.6f} <= {entry_price:.6f}")
-            stop_loss = entry_price * 1.005  # Принудительно +0.5%
+            stop_loss = entry_price * 1.005
             logger.warning(f"   Исправляем SELL стоп: {stop_loss:.6f}")
 
         elif signal_type == "BUY" and stop_loss >= entry_price:
             logger.error(f"❌ НЕПРАВИЛЬНЫЙ BUY СТОП: {stop_loss:.6f} >= {entry_price:.6f}")
-            stop_loss = entry_price * 0.995  # Принудительно -0.5%
+            stop_loss = entry_price * 0.995
             logger.warning(f"   Исправляем BUY стоп: {stop_loss:.6f}")
 
-        # ✅ ИСПРАВЛЕНО: Расстояние между entry и stop
         risk_distance = abs(stop_loss - entry_price)
 
-        # ✅ Защита от нулевого или очень малого риска
-        if risk_distance < entry_price * 0.0001:  # Риск меньше 0.01%
+        if risk_distance < entry_price * 0.0001:
             logger.warning(f"⚠️ Слишком маленький риск: {risk_distance:.6f} ({risk_distance / entry_price * 100:.4f}%)")
-            logger.warning(f"   Устанавливаем минимальный риск 0.5%")
-            risk_distance = entry_price * 0.005  # Минимум 0.5%
+            risk_distance = entry_price * 0.005
 
-        # ✅ ИСПРАВЛЕНО: Целевое расстояние до TP (с учетом R/R 3:1)
         target_reward_distance = risk_distance * self.min_rr_ratio
 
-        # ✅ ДОБАВЛЕНО: Дебаг логи для проверки
         logger.debug(f"🔍 TP CALCULATION DEBUG:")
         logger.debug(f"   Entry: {entry_price:.6f}")
         logger.debug(f"   Stop Loss: {stop_loss:.6f}")
         logger.debug(f"   Risk distance: {risk_distance:.6f} ({risk_distance / entry_price * 100:.3f}%)")
         logger.debug(f"   min_rr_ratio: {self.min_rr_ratio}")
-        logger.debug(
-            f"   Target reward distance: {target_reward_distance:.6f} ({target_reward_distance / entry_price * 100:.3f}%)")
+        logger.debug(f"   Target reward distance: {target_reward_distance:.6f} ({target_reward_distance / entry_price * 100:.3f}%)")
         logger.debug(f"   ATR: {atr:.6f} ({atr / entry_price * 100:.3f}%)")
         logger.debug(f"   ATR multiplier: {self.tp_atr_multiplier}")
         logger.debug(f"   Target by ATR: {atr * self.tp_atr_multiplier:.6f}")
 
-        # ✅ АЛЬТЕРНАТИВНЫЙ РАСЧЕТ: Проверяем, что TP не слишком близко/далеко по ATR
         tp_by_atr = atr * self.tp_atr_multiplier
         if target_reward_distance < tp_by_atr * 0.5:
             logger.warning(f"⚠️ TP слишком близкий по сравнению с ATR")
-            logger.warning(f"   По R/R: {target_reward_distance:.6f}, По ATR: {tp_by_atr:.6f}")
-            # Используем большее значение
             target_reward_distance = max(target_reward_distance, tp_by_atr)
             logger.warning(f"   Используем: {target_reward_distance:.6f}")
 
-        # ✅ ИСПРАВЛЕНО: Расчет TP
         if signal_type == "SELL":
             take_profit = entry_price - target_reward_distance
 
-            # ✅ ИСПРАВЛЕНО: Проверка что TP ниже entry для SELL
             if take_profit >= entry_price:
                 logger.error(f"❌ SELL TP выше entry: {take_profit:.6f} >= {entry_price:.6f}")
                 take_profit = entry_price * (1 - self.tp_safety_buffer_pct / 100)
                 logger.warning(f"   Исправляем SELL TP: {take_profit:.6f}")
 
-            # ✅ Защита от слишком низких/негативных цен
             min_tp = entry_price * self.min_tp_floor_pct
             if take_profit < min_tp:
                 logger.warning(f"⚠️ SELL TP слишком низкий: {take_profit:.6f} < {min_tp:.6f}")
                 take_profit = min_tp
                 logger.warning(f"   Устанавливаем минимальный TP: {take_profit:.6f}")
 
-            # ✅ Проверка, что TP ниже current price (для SELL)
-            # (Эту проверку нужно делать в вызывающем коде с current_price)
-
-        else:  # BUY
+        else:
             take_profit = entry_price + target_reward_distance
 
-            # ✅ ИСПРАВЛЕНО: Проверка что TP выше entry для BUY
             if take_profit <= entry_price:
                 logger.error(f"❌ BUY TP ниже entry: {take_profit:.6f} <= {entry_price:.6f}")
                 take_profit = entry_price * (1 + self.tp_safety_buffer_pct / 100)
                 logger.warning(f"   Исправляем BUY TP: {take_profit:.6f}")
 
-            # ✅ Защита от слишком высоких цен
             max_tp = entry_price * self.max_tp_ceiling_pct
             if take_profit > max_tp:
                 logger.warning(f"⚠️ BUY TP слишком высокий: {take_profit:.6f} > {max_tp:.6f}")
                 take_profit = max_tp
                 logger.warning(f"   Устанавливаем максимальный TP: {take_profit:.6f}")
 
-        # ✅ ИСПРАВЛЕНО: Проверка минимального расстояния TP от Entry
         risk_management_config = self.config.get('analysis', {}).get('risk_management', {})
-        min_tp_distance_pct = risk_management_config.get('min_tp_distance_pct', 1.5)  # 1.5% из конфига!
+        min_tp_distance_pct = risk_management_config.get('min_tp_distance_pct', 1.5)
 
         tp_distance = abs(take_profit - entry_price)
         tp_distance_pct = (tp_distance / entry_price) * 100
 
         if tp_distance_pct < min_tp_distance_pct:
             logger.warning(f"⚠️ TP слишком близко к Entry ({tp_distance_pct:.3f}% < {min_tp_distance_pct}%)")
-
-            # Пересчитываем с минимальным расстоянием
             if signal_type == "SELL":
                 take_profit = entry_price * (1 - min_tp_distance_pct / 100)
             else:
                 take_profit = entry_price * (1 + min_tp_distance_pct / 100)
-
             logger.warning(f"   Устанавливаем минимальный TP: {take_profit:.6f} ({min_tp_distance_pct}%)")
 
-            # Пересчитываем distance
             tp_distance = abs(take_profit - entry_price)
             tp_distance_pct = (tp_distance / entry_price) * 100
 
-        # ✅ ИСПРАВЛЕНО: ПРАВИЛЬНОЕ вычисление R/R для логгирования
         final_risk_distance = abs(stop_loss - entry_price)
         final_reward_distance = abs(take_profit - entry_price)
 
@@ -489,11 +463,9 @@ class Screen3SignalGenerator:
             actual_rr_ratio = 0.0
             logger.error(f"❌ НУЛЕВОЙ РИСК! final_risk_distance={final_risk_distance}")
 
-        # ✅ Проверка качества R/R
-        if actual_rr_ratio < self.min_rr_ratio * 0.9:  # Допуск 10%
+        if actual_rr_ratio < self.min_rr_ratio * 0.9:
             logger.warning(f"⚠️ Плохой R/R: {actual_rr_ratio:.2f}:1 < {self.min_rr_ratio}:1 (min)")
 
-            # Попытка улучшить
             if signal_type == "SELL":
                 take_profit = entry_price - (final_risk_distance * self.min_rr_ratio)
             else:
@@ -501,7 +473,6 @@ class Screen3SignalGenerator:
 
             logger.warning(f"   Пересчитываем TP для минимального R/R: {take_profit:.6f}")
 
-            # Пересчитываем показатели
             final_reward_distance = abs(take_profit - entry_price)
             if final_risk_distance > 0:
                 actual_rr_ratio = final_reward_distance / final_risk_distance
@@ -514,15 +485,14 @@ class Screen3SignalGenerator:
         logger.info(f"   Риск: {final_risk_distance / entry_price * 100:.2f}%")
         logger.info(f"   Награда: {final_reward_distance / entry_price * 100:.2f}%")
 
-        # ✅ ФИНАЛЬНАЯ ПРОВЕРКА: корректность TP для типа сигнала
         if signal_type == "SELL" and take_profit > entry_price:
             logger.error(f"❌ ФИНАЛЬНАЯ ОШИБКА: SELL TP {take_profit:.6f} > entry {entry_price:.6f}")
-            take_profit = entry_price * 0.99  # Экстренная корректировка
+            take_profit = entry_price * 0.99
             logger.warning(f"   Экстренная корректировка SELL TP: {take_profit:.6f}")
 
         elif signal_type == "BUY" and take_profit < entry_price:
             logger.error(f"❌ ФИНАЛЬНАЯ ОШИБКА: BUY TP {take_profit:.6f} < entry {entry_price:.6f}")
-            take_profit = entry_price * 1.01  # Экстренная корректировка
+            take_profit = entry_price * 1.01
             logger.warning(f"   Экстренная корректировка BUY TP: {take_profit:.6f}")
 
         return take_profit
@@ -530,16 +500,14 @@ class Screen3SignalGenerator:
     def _check_signal_quality(self, entry_price: float, stop_loss: float,
                               take_profit: float, signal_type: str,
                               current_price: float) -> Tuple[bool, Dict[str, float]]:
-        """✅ ИСПРАВЛЕНО: Проверка качества сигнала с детальными логами"""
+        """Проверка качества сигнала"""
 
-        # 1. Проверка расстояния от текущей цены
         entry_distance_pct = abs(entry_price - current_price) / current_price * 100
         if entry_distance_pct > self.max_entry_distance_pct:
             logger.warning(
                 f"❌ Зона входа слишком далеко: {entry_distance_pct:.1f}% (макс: {self.max_entry_distance_pct}%)")
             return False, {}
 
-        # 2. Расчет Risk/Reward
         risk = abs(stop_loss - entry_price)
         reward = abs(take_profit - entry_price)
 
@@ -549,7 +517,6 @@ class Screen3SignalGenerator:
 
         rr_ratio = reward / risk
 
-        # ✅ ДОБАВЛЕНО: Полное дебаг-логирование
         logger.debug(f"🔍 SIGNAL QUALITY CHECK:")
         logger.debug(f"   Entry:          {entry_price:.6f}")
         logger.debug(f"   Stop Loss:      {stop_loss:.6f}")
@@ -567,13 +534,11 @@ class Screen3SignalGenerator:
                 f"❌ Плохой R/R: {rr_ratio:.2f}:1 (нужно {self.min_rr_ratio}:1, с допуском {self.min_rr_ratio - self.rr_quality_tolerance:.2f})")
             return False, {}
 
-        # 3. Проверка процента риска
         risk_pct = risk / entry_price * 100
         if risk_pct > self.max_risk_pct * 100:
             logger.warning(f"❌ Слишком большой риск: {risk_pct:.1f}% (макс {self.max_risk_pct * 100:.1f}%)")
             return False, {}
 
-        # 4. Проверка что Stop Loss правильный для типа сигнала
         if signal_type == "SELL":
             if stop_loss <= entry_price:
                 logger.warning(f"❌ Для SELL Stop Loss должен быть ВЫШЕ цены входа")
@@ -599,7 +564,7 @@ class Screen3SignalGenerator:
     def _calculate_atr(self, high_prices: List[float], low_prices: List[float],
                        close_prices: List[float], period: int = None,
                        entry_price: float = None) -> float:
-        """Расчет Average True Range с улучшенным логированием"""
+        """Расчет Average True Range"""
         if period is None:
             period = self.atr_period
 
@@ -608,9 +573,8 @@ class Screen3SignalGenerator:
         try:
             if len(high_prices) < period + 1:
                 logger.warning(f"⚠️ Недостаточно данных для ATR: {len(high_prices)} < {period + 1}")
-                # Используем entry_price если есть, иначе среднюю цену
                 if entry_price is not None:
-                    return entry_price * 0.005  # 0.5% от entry
+                    return entry_price * 0.005
                 elif close_prices:
                     avg_price = sum(close_prices[-10:]) / min(10, len(close_prices))
                     return avg_price * 0.005
@@ -628,7 +592,6 @@ class Screen3SignalGenerator:
             recent_tr = tr_values[-period:] if len(tr_values) >= period else tr_values
             atr = sum(recent_tr) / len(recent_tr)
 
-            # Используем entry_price для проверки если он есть
             check_price = entry_price if entry_price is not None else close_prices[-1] if close_prices else 0
 
             if check_price > 0:
@@ -728,23 +691,18 @@ class Screen3SignalGenerator:
                 logger.warning("Недостаточно данных M15 для поиска паттернов")
                 return patterns
 
-            # Анализ Pin Bar
             pin_bar = self._analyze_pin_bar_m15(m15_klines, trend_direction)
             if pin_bar: patterns.append(pin_bar)
 
-            # Анализ Engulfing
             engulfing = self._analyze_engulfing_m15(m15_klines, trend_direction)
             if engulfing: patterns.append(engulfing)
 
-            # Анализ Morning/Evening Star
             morning_evening_star = self._analyze_morning_evening_star_m15(m15_klines, trend_direction)
             if morning_evening_star: patterns.append(morning_evening_star)
 
-            # Анализ MA кроссовера
             ma_crossover = self._analyze_ma_crossover_m15(m15_klines, trend_direction)
             if ma_crossover: patterns.append(ma_crossover)
 
-            # Анализ MA отскока
             ma_bounce = self._analyze_ma_bounce_m15(m15_klines, trend_direction)
             if ma_bounce: patterns.append(ma_bounce)
 
@@ -1032,39 +990,32 @@ class Screen3SignalGenerator:
         logger.debug(f"Анализ MA кроссовера M15, тренд: {trend_direction}")
 
         try:
-            # ✅ ИСПРАВЛЕНО: Проверка достаточности данных из конфига
             if len(m15_klines) < self.ma_crossover_min_candles:
                 logger.warning(
                     f"❌ Недостаточно данных M15 для анализа MA кроссовера: {len(m15_klines)} < {self.ma_crossover_min_candles}")
                 return None
 
-            # Берем только последние 50 свечей для оптимизации
             recent_klines = m15_klines[-50:] if len(m15_klines) > 50 else m15_klines
             closes = [float(k[4]) for k in recent_klines]
 
             logger.debug(f"Анализируем {len(closes)} свечей для MA кроссовера")
 
-            # Простой расчет EMA
             def calculate_simple_ema(prices, period):
                 if len(prices) < period:
-                    logger.warning(f"Недостаточно цен для EMA{period}: {len(prices)} < {period}")
                     return []
 
                 ema_values = []
                 multiplier = 2 / (period + 1)
 
-                # Начальное значение SMA
                 ema = sum(prices[:period]) / period
                 ema_values.append(ema)
 
-                # Рекурсивный расчет EMA
                 for price in prices[period:]:
                     ema = (price * multiplier) + (ema * (1 - multiplier))
                     ema_values.append(ema)
 
                 return ema_values
 
-            # Рассчитываем EMA
             ema_20 = calculate_simple_ema(closes, 20)
             ema_50 = calculate_simple_ema(closes, 50)
 
@@ -1072,11 +1023,9 @@ class Screen3SignalGenerator:
                 logger.warning("❌ EMA не рассчитаны для анализа кроссовера")
                 return None
 
-            # ✅ ИСПРАВЛЕНО: Проверяем, что EMA рассчитаны корректно (не NaN)
             def contains_nan(values):
                 for value in values:
-                    # Проверка на NaN несколькими способами
-                    if value != value:  # NaN никогда не равен самому себе
+                    if value != value:
                         return True
                     try:
                         import math
@@ -1086,12 +1035,10 @@ class Screen3SignalGenerator:
                         pass
                 return False
 
-            # Проверяем последние 5 значений EMA
             if contains_nan(ema_20[-5:]) or contains_nan(ema_50[-5:]):
                 logger.warning("❌ EMA содержат NaN значения")
                 return None
 
-            # Проверяем, что EMA не нулевые
             if any(ema == 0 for ema in ema_20[-5:]) or any(ema == 0 for ema in ema_50[-5:]):
                 logger.warning("❌ EMA содержат нулевые значения")
                 return None
@@ -1105,16 +1052,14 @@ class Screen3SignalGenerator:
             signal = None
 
             if trend_direction == "BULL":
-                # Бычий кроссовер: цена пересекает EMA20 снизу вверх
                 bullish_crossover = (
-                        prev_close <= prev_ema20 and  # Цена была ниже EMA20
-                        current_close > current_ema20 and  # Цена стала выше EMA20
-                        current_ema20 > prev_ema20 and  # EMA20 растет
-                        current_close > current_ema50  # Цена выше EMA50
+                        prev_close <= prev_ema20 and
+                        current_close > current_ema20 and
+                        current_ema20 > prev_ema20 and
+                        current_close > current_ema50
                 )
 
                 if bullish_crossover:
-                    # Проверяем, что цена действительно была ниже EMA20 в течение нескольких свечей
                     lookback = min(self.ma_crossover_lookback_candles, len(closes) - 1)
                     was_below = True
                     for i in range(2, lookback + 1):
@@ -1125,7 +1070,7 @@ class Screen3SignalGenerator:
 
                     if was_below:
                         distance_pct = ((current_close - current_ema20) / current_ema20) * 100
-                        confidence = 0.7 + min(distance_pct / 10, 0.15)  # До 0.85 максимум
+                        confidence = 0.7 + min(distance_pct / 10, 0.15)
 
                         logger.info(f"✅ Обнаружен бычий MA кроссовер: {current_close:.2f} > EMA20={current_ema20:.2f} "
                                     f"(расстояние: {distance_pct:.1f}%)")
@@ -1140,16 +1085,14 @@ class Screen3SignalGenerator:
                         }
 
             elif trend_direction == "BEAR":
-                # Медвежий кроссовер: цена пересекает EMA20 сверху вниз
                 bearish_crossover = (
-                        prev_close >= prev_ema20 and  # Цена была выше EMA20
-                        current_close < current_ema20 and  # Цена стала ниже EMA20
-                        current_ema20 < prev_ema20 and  # EMA20 падает
-                        current_close < current_ema50  # Цена ниже EMA50
+                        prev_close >= prev_ema20 and
+                        current_close < current_ema20 and
+                        current_ema20 < prev_ema20 and
+                        current_close < current_ema50
                 )
 
                 if bearish_crossover:
-                    # Проверяем, что цена действительно была выше EMA20 в течение нескольких свечей
                     lookback = min(self.ma_crossover_lookback_candles, len(closes) - 1)
                     was_above = True
                     for i in range(2, lookback + 1):
@@ -1200,7 +1143,6 @@ class Screen3SignalGenerator:
             highs = [float(k[2]) for k in m15_klines]
             lows = [float(k[3]) for k in m15_klines]
 
-            # Простой расчет EMA
             def calculate_simple_ema(prices, period):
                 if len(prices) < period:
                     return []
@@ -1424,7 +1366,6 @@ class Screen3SignalGenerator:
             current_close = float(m15_klines[-1][4])
             current_price = current_close
 
-            # Проверяем условия для генерации сигнала
             has_trigger = bool(patterns or rsi_divergence)
 
             stochastic_signal = False
@@ -1454,10 +1395,8 @@ class Screen3SignalGenerator:
                 logger.warning("Условия для генерации сигнала не выполнены")
                 return None
 
-            # Определяем тип сигнала
             signal_type = "BUY" if screen1.trend_direction == "BULL" else "SELL"
 
-            # Выбор цены входа
             if screen2.best_zone:
                 entry_price = screen2.best_zone
                 logger.info(f"Используем лучшую зону входа: {entry_price:.2f}")
@@ -1465,12 +1404,10 @@ class Screen3SignalGenerator:
                 entry_price = current_close
                 logger.warning(f"Нет лучшей зоны, используем текущую цену: {entry_price:.2f}")
 
-            # Проверяем что цена входа реалистична
             if not self._validate_price_range(entry_price, "BTCUSDT"):
                 logger.warning("❌ Цена входа нереалистична")
                 return None
 
-            # Расчет индикаторов для Stop Loss
             highs = [float(k[2]) for k in m15_klines]
             lows = [float(k[3]) for k in m15_klines]
             closes = [float(k[4]) for k in m15_klines]
@@ -1478,7 +1415,6 @@ class Screen3SignalGenerator:
             current_price = closes[-1] if closes else 0
             atr = self._calculate_atr(highs, lows, closes, self.atr_period, current_price)
 
-            # Расчет Stop Loss
             stop_loss = self._calculate_stop_loss(
                 entry_price=entry_price,
                 signal_type=signal_type,
@@ -1487,7 +1423,6 @@ class Screen3SignalGenerator:
                 support_level=screen1.key_levels.get("support") if screen1.key_levels else None
             )
 
-            # Расчет Take Profit
             take_profit = self._calculate_take_profit(
                 entry_price=entry_price,
                 stop_loss=stop_loss,
@@ -1495,7 +1430,6 @@ class Screen3SignalGenerator:
                 atr=atr
             )
 
-            # Проверка качества сигнала
             quality_ok, quality_metrics = self._check_signal_quality(
                 entry_price=entry_price,
                 stop_loss=stop_loss,
@@ -1508,7 +1442,6 @@ class Screen3SignalGenerator:
                 logger.warning("❌ Сигнал не прошел проверку качества")
                 return None
 
-            # Расчет уверенности
             base_confidence = (screen1.confidence_score + screen2.confidence) / 2
 
             if patterns:
@@ -1522,7 +1455,6 @@ class Screen3SignalGenerator:
             if stochastic_signal:
                 base_confidence = min(base_confidence + self.stochastic_confidence_bonus, self.max_confidence)
 
-            # Увеличиваем уверенность за хороший R/R
             if quality_metrics["rr_ratio"] >= self.min_rr_ratio * self.rr_quality_bonus_threshold:
                 base_confidence = min(base_confidence + self.pattern_confidence_bonus, self.max_confidence)
                 logger.info(f"✅ Бонус за отличный R/R ≥ {self.min_rr_ratio * self.rr_quality_bonus_threshold:.1f}:1")

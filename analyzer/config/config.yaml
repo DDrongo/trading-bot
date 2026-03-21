@@ -147,6 +147,20 @@ analysis:
     send_telegram_on_save: true
     stochastic_confidence_bonus: 0.05
     strong_confidence_threshold: 0.8
+  # ============================================================
+  # НОВАЯ СЕКЦИЯ: Типы сигналов (Фаза 1.2)
+  # ============================================================
+  signal_types:
+    watch:
+      enabled: true
+      conditions_required: 4
+      total_conditions: 5
+    limit:
+      min_rr_ratio: 3.0
+      expiration_hours: 24
+    instant:
+      min_rr_ratio: 2.0
+      expiration_hours: 3
   structure:
     lookback_period: 6
     ma_bounce_max_distance_pct: 2.0
