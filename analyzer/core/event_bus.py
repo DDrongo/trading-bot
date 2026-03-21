@@ -1,4 +1,4 @@
-# core/event_bus.py
+# analyzer/core/event_bus.py (обновлённый - ПОЛНОСТЬЮ)
 """
 🔌 Шина событий для связи между модулями
 """
@@ -28,6 +28,12 @@ class EventType(Enum):
     TRADE_EXECUTED = "TRADE_EXECUTED"
     TRADE_CLOSED = "TRADE_CLOSED"
     POSITION_UPDATED = "POSITION_UPDATED"
+
+    # НОВЫЕ СОБЫТИЯ ДЛЯ ФАЗЫ 1.3
+    POSITION_OPENED = "POSITION_OPENED"
+    POSITION_CLOSED = "POSITION_CLOSED"
+    TP_HIT = "TP_HIT"
+    SL_HIT = "SL_HIT"
 
     # Анализ
     LIQUIDITY_CHECK_PASSED = "LIQUIDITY_CHECK_PASSED"
@@ -175,7 +181,7 @@ class EventBus:
 
         # Логируем важные события
         if event_type in [EventType.ERROR_OCCURRED, EventType.TRADING_SIGNAL_GENERATED,
-                          EventType.TRADE_EXECUTED]:
+                          EventType.TRADE_EXECUTED, EventType.POSITION_OPENED, EventType.POSITION_CLOSED]:
             logger.info(f"📢 {event_type.value}: {data.get('symbol', 'system')}")
 
         # Добавляем в очередь на обработку

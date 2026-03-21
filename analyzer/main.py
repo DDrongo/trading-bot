@@ -1,3 +1,4 @@
+# analyzer/main.py (обновлённый - ПОЛНОСТЬЮ)
 #!/usr/bin/env python3
 """
 🚀 ГЛАВНЫЙ ЗАПУСКАЕМЫЙ ФАЙЛ ДЛЯ АНАЛИЗАТОРА СИГНАЛОВ
@@ -16,6 +17,8 @@ from analyzer.core.api_client_bybit import BybitAPIClient
 from analyzer.core.orchestrator import AnalysisOrchestrator
 # ✅ ДОБАВЛЕННЫЕ ИМПОРТЫ ДЛЯ EVENTBUS
 from analyzer.core.event_bus import event_bus, EventType, Event
+# ✅ НОВЫЕ ИМПОРТЫ ДЛЯ ФАЗЫ 1.3
+from analyzer.core.position_manager import PositionManager
 
 # Настройка логирования
 logging.basicConfig(
@@ -37,6 +40,7 @@ class SignalGeneratorService:
         self.config = self._load_config()
         self.api_client = None
         self.orchestrator = None
+        self.position_manager = None  # НОВОЕ
 
     def _load_config(self) -> Dict[str, Any]:
         """Загрузка конфигурации"""
@@ -122,6 +126,15 @@ class SignalGeneratorService:
             if not orchestrator_init:
                 logger.error("❌ Не удалось инициализировать оркестратор")
                 return False
+
+            # ✅ 6. НОВОЕ: POSITION MANAGER
+            logger.info("🎯 Инициализация Position Manager...")
+            self.position_manager = PositionManager(self.config, self.api_client)
+            pm_init = await self.position_manager.initialize()
+            if not pm_init:
+                logger.warning("⚠️ Position Manager не инициализирован (торговля не будет выполняться)")
+            else:
+                logger.info("✅ Position Manager готов к работе")
 
             logger.info("✅ SignalGeneratorService готов к работе")
             return True
@@ -254,6 +267,14 @@ class SignalGeneratorService:
                             f"Сигналов: {signals_found}, "
                             f"Время: {iteration_duration:.1f} сек")
 
+                # ✅ Выводим статистику Position Manager
+                if self.position_manager:
+                    stats = await self.position_manager.paper_account.get_statistics()
+                    logger.info(f"💰 PAPER СЧЁТ: Баланс: {stats['balance']:.2f} USDT, "
+                              f"Открыто: {stats['open_positions']}, "
+                              f"Всего сделок: {stats['total_trades']}, "
+                              f"Win Rate: {stats['win_rate']:.1f}%")
+
                 # Ожидание до следующей итерации
                 wait_time = max(1, interval_seconds - iteration_duration)
                 if wait_time > 0:
@@ -273,6 +294,10 @@ class SignalGeneratorService:
     async def cleanup(self):
         """Очистка ресурсов"""
         logger.info("🧹 Очистка ресурсов...")
+
+        # ✅ Очистка Position Manager
+        if self.position_manager:
+            await self.position_manager.cleanup()
 
         # ✅ КОРРЕКТНАЯ ОСТАНОВКА EVENTBUS
         try:
@@ -302,6 +327,7 @@ async def main():
         logger.info("🚀 ЗАПУСК БОТА С ЦИКЛИЧЕСКИМ МОНИТОРИНГОМ")
         logger.info("🎯 НАСТРОЙКИ: R/R 3:1+, SL 1%, TP 1.5%+, ЦИКЛ 60 сек")
         logger.info("🔌 EventBus интегрирован для межмодульной коммуникации")
+        logger.info("🎯 POSITION MANAGER активирован для автоматической торговли (PAPER)")
 
         if not await service.initialize():
             logger.error("❌ Не удалось инициализировать сервис")
@@ -313,6 +339,7 @@ async def main():
         logger.info(f"🔄 Запуск циклического мониторинга каждые {interval_seconds} секунд")
         logger.info("📡 Бот будет автоматически получать ВСЕ монеты с биржи")
         logger.info("🎯 Сигналы будут с R/R 3:1+ и улучшенными Stop Loss")
+        logger.info("💰 Торговля в PAPER режиме (виртуальный счёт)")
 
         await service.continuous_monitoring(interval_seconds=interval_seconds)
 
