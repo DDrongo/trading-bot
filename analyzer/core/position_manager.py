@@ -1,6 +1,7 @@
 # analyzer/core/position_manager.py
 """
 🎯 POSITION MANAGER - Управление позициями
+Поддержка LIMIT (лимитные ордера) и INSTANT (рыночные) сигналов
 """
 
 import asyncio
@@ -12,7 +13,7 @@ import traceback
 from analyzer.core.event_bus import EventType, Event, event_bus
 from analyzer.core.signal_repository import signal_repository
 from analyzer.core.trade_repository import trade_repository
-from analyzer.core.paper_account import PaperAccount, PaperPosition
+from analyzer.core.paper_account import PaperAccount, PaperPosition, PendingOrder
 from analyzer.core.api_client_bybit import BybitAPIClient
 
 logger = logging.getLogger('position_manager')
@@ -22,7 +23,9 @@ class PositionManager:
     """
     Управление позициями:
     - Подписка на события сигналов
-    - Открытие позиций (только LIMIT/INSTANT)
+    - LIMIT сигналы → PENDING ордер, ожидание цены
+    - INSTANT сигналы → ACTIVE позиция (рыночный ордер)
+    - Мониторинг лимитных ордеров (достижение цены)
     - Мониторинг открытых позиций
     - Закрытие по TP/SL/EXPIRED
     - Сохранение истории
@@ -41,12 +44,13 @@ class PositionManager:
         # Компоненты
         self.paper_account = PaperAccount(config)
         self.open_positions: Dict[int, PaperPosition] = {}
+        self.pending_limit_orders: Dict[int, PendingOrder] = {}
 
         # Состояние
         self.running = False
         self.monitoring_task = None
 
-        logger.info("🎯 Position Manager инициализирован")
+        logger.info("🎯 Position Manager инициализирован (Фаза 1.3.1)")
         logger.info(f"   Мониторинг раз в {self.monitoring_interval} сек")
         logger.info(f"   Режим: PAPER TRADING (виртуальный счёт)")
 
@@ -60,8 +64,9 @@ class PositionManager:
             event_bus.subscribe(EventType.TRADING_SIGNAL_GENERATED, self.on_signal_generated)
             logger.info("✅ Position Manager подписан на TRADING_SIGNAL_GENERATED")
 
-            # Восстанавливаем открытые позиции из БД (если есть)
+            # Восстанавливаем открытые позиции и ожидающие ордера из БД
             await self._restore_open_positions()
+            await self._restore_pending_orders()
 
             # Запускаем мониторинг
             self.running = True
@@ -81,21 +86,23 @@ class PositionManager:
             data = event.data
             signal_id = data.get('signal_id')
             signal_subtype = data.get('signal_subtype', 'LIMIT')
+            order_type = data.get('order_type', 'MARKET')
 
-            logger.info(f"📢 Получен сигнал #{signal_id} (тип: {signal_subtype}")
+            logger.info(f"📢 Получен сигнал #{signal_id} (тип: {signal_subtype}, ордер: {order_type})")
 
             # WATCH сигналы не открывают позиции
             if signal_subtype == 'WATCH':
                 logger.info(f"👀 WATCH сигнал #{signal_id}: позиция не открывается (только наблюдение)")
                 return
 
-            # Проверяем лимит открытых позиций
+            # Проверяем лимит открытых позиций + ожидающих ордеров
             max_positions = self.pos_config.get('max_positions', 5)
-            if len(self.open_positions) >= max_positions:
-                logger.warning(f"⚠️ Достигнут лимит открытых позиций ({max_positions})")
+            total_active = len(self.open_positions) + len(self.pending_limit_orders)
+            if total_active >= max_positions:
+                logger.warning(f"⚠️ Достигнут лимит активных позиций/ордеров ({max_positions})")
                 return
 
-            # Открываем позицию
+            # Открываем позицию в зависимости от типа
             await self._open_position_from_signal(data)
 
         except Exception as e:
@@ -103,7 +110,7 @@ class PositionManager:
             logger.error(traceback.format_exc())
 
     async def _open_position_from_signal(self, signal_data: Dict[str, Any]):
-        """Открыть позицию из данных сигнала"""
+        """Открыть позицию из данных сигнала (с поддержкой LIMIT/MARKET)"""
         try:
             signal_id = signal_data['signal_id']
             symbol = signal_data['symbol']
@@ -112,6 +119,7 @@ class PositionManager:
             stop_loss = signal_data['stop_loss']
             take_profit = signal_data['take_profit']
             signal_subtype = signal_data.get('signal_subtype', 'LIMIT')
+            order_type = signal_data.get('order_type', 'MARKET')
             expiration_time = signal_data.get('expiration_time')
 
             if expiration_time and isinstance(expiration_time, str):
@@ -126,6 +134,9 @@ class PositionManager:
                 logger.warning(f"⚠️ Некорректное количество для сигнала #{signal_id}: {quantity}")
                 return
 
+            # Сохраняем размер позиции в БД
+            await signal_repository.update_position_size(signal_id, quantity)
+
             # Открываем позицию в Paper Account
             position = await self.paper_account.open_position(
                 signal_id=signal_id,
@@ -135,43 +146,73 @@ class PositionManager:
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 quantity=quantity,
-                expiration_time=expiration_time
+                expiration_time=expiration_time,
+                order_type=order_type
             )
 
-            # Сохраняем в локальный словарь
-            self.open_positions[signal_id] = position
+            # Определяем тип ордера и обновляем статус
+            if signal_subtype == 'INSTANT' or order_type == 'MARKET':
+                # Рыночный ордер - сразу активен
+                self.open_positions[signal_id] = position
+                await signal_repository.update_signal_status(signal_id, 'ACTIVE')
 
-            # Обновляем статус сигнала
-            await signal_repository.update_signal_status(signal_id, 'ACTIVE')
-
-            # Сохраняем сделку в историю
-            trade_data = {
-                'signal_id': signal_id,
-                'symbol': symbol,
-                'direction': direction,
-                'entry_price': position.entry_price,
-                'quantity': quantity,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'opened_at': position.opened_at,
-                'status': 'OPEN'
-            }
-            await trade_repository.save_trade(trade_data)
-
-            # Публикуем событие
-            await event_bus.publish(
-                EventType.POSITION_OPENED,
-                {
+                # Сохраняем сделку в историю
+                trade_data = {
                     'signal_id': signal_id,
                     'symbol': symbol,
                     'direction': direction,
                     'entry_price': position.entry_price,
                     'quantity': quantity,
                     'stop_loss': stop_loss,
-                    'take_profit': take_profit
-                },
-                'position_manager'
-            )
+                    'take_profit': take_profit,
+                    'opened_at': position.opened_at,
+                    'status': 'OPEN',
+                    'order_type': 'MARKET',
+                    'fill_price': position.entry_price
+                }
+                await trade_repository.save_trade(trade_data)
+
+                logger.info(
+                    f"⚡ INSTANT сигнал #{signal_id}: позиция открыта по рыночной цене {position.entry_price:.6f}")
+
+                # Публикуем событие
+                await event_bus.publish(
+                    EventType.POSITION_OPENED,
+                    {
+                        'signal_id': signal_id,
+                        'symbol': symbol,
+                        'direction': direction,
+                        'entry_price': position.entry_price,
+                        'quantity': quantity,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'order_type': 'MARKET'
+                    },
+                    'position_manager'
+                )
+
+            else:  # LIMIT сигнал
+                # Лимитный ордер - ожидаем исполнения
+                self.pending_limit_orders[signal_id] = await self.paper_account.get_pending_order(signal_id)
+                await signal_repository.update_signal_status(signal_id, 'PENDING')
+
+                logger.info(f"📊 LIMIT сигнал #{signal_id}: лимитный ордер выставлен, ожидаем цену {entry_price:.6f}")
+
+                # Публикуем событие о создании лимитного ордера
+                await event_bus.publish(
+                    EventType.ORDER_CREATED,
+                    {
+                        'signal_id': signal_id,
+                        'symbol': symbol,
+                        'direction': direction,
+                        'entry_price': entry_price,
+                        'quantity': quantity,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'expiration_time': expiration_time.isoformat() if expiration_time else None
+                    },
+                    'position_manager'
+                )
 
         except Exception as e:
             logger.error(f"❌ Ошибка открытия позиции из сигнала: {e}")
@@ -222,13 +263,18 @@ class PositionManager:
             return self.default_quantity
 
     async def _monitor_positions(self):
-        """Фоновый мониторинг открытых позиций"""
-        logger.info("🔄 Запуск мониторинга позиций")
+        """Фоновый мониторинг позиций и лимитных ордеров"""
+        logger.info("🔄 Запуск мониторинга позиций и лимитных ордеров")
 
         while self.running:
             try:
-                # Получаем текущие цены для всех символов
-                symbols = list(set(p.symbol for p in self.open_positions.values()))
+                # 1. Проверяем лимитные ордера (достижение цены)
+                await self._monitor_limit_orders()
+
+                # 2. Получаем текущие цены для всех символов
+                symbols = set()
+                symbols.update(p.symbol for p in self.open_positions.values())
+                symbols.update(o.symbol for o in self.pending_limit_orders.values())
 
                 current_prices = {}
                 for symbol in symbols:
@@ -239,7 +285,7 @@ class PositionManager:
                     except Exception as e:
                         logger.error(f"Ошибка получения цены {symbol}: {e}")
 
-                # Проверяем каждую позицию
+                # 3. Проверяем каждую открытую позицию
                 for signal_id, position in list(self.open_positions.items()):
                     current_price = current_prices.get(position.symbol)
                     if not current_price:
@@ -256,6 +302,11 @@ class PositionManager:
                         await self._close_position(signal_id, 'EXPIRED', current_price)
                         continue
 
+                # 4. Проверяем истечение лимитных ордеров
+                for signal_id, order in list(self.pending_limit_orders.items()):
+                    if self._is_order_expired(order):
+                        await self._expire_limit_order(signal_id)
+
                 # Ждём следующей итерации
                 await asyncio.sleep(self.monitoring_interval)
 
@@ -264,6 +315,107 @@ class PositionManager:
             except Exception as e:
                 logger.error(f"Ошибка в мониторинге: {e}")
                 await asyncio.sleep(self.monitoring_interval)
+
+    async def _monitor_limit_orders(self):
+        """Мониторинг лимитных ордеров на достижение цены"""
+        try:
+            # Получаем актуальные цены для всех символов с лимитными ордерами
+            symbols = list(set(o.symbol for o in self.pending_limit_orders.values()))
+
+            current_prices = {}
+            for symbol in symbols:
+                try:
+                    price = await self.api_client.get_current_price(symbol)
+                    if price:
+                        current_prices[symbol] = price
+                except Exception as e:
+                    logger.error(f"Ошибка получения цены {symbol} для лимитного ордера: {e}")
+
+            for signal_id, order in list(self.pending_limit_orders.items()):
+                current_price = current_prices.get(order.symbol)
+                if not current_price:
+                    continue
+
+                # Проверяем достижение цены
+                should_execute = False
+                if order.direction == 'BUY' and current_price <= order.entry_price:
+                    should_execute = True
+                elif order.direction == 'SELL' and current_price >= order.entry_price:
+                    should_execute = True
+
+                if should_execute:
+                    # Исполняем лимитный ордер
+                    position = await self.paper_account.execute_limit_order(signal_id, current_price)
+
+                    if position:
+                        # Перемещаем из pending в open
+                        self.pending_limit_orders.pop(signal_id, None)
+                        self.open_positions[signal_id] = position
+
+                        # Обновляем статус сигнала
+                        await signal_repository.update_signal_status(signal_id, 'ACTIVE')
+                        await signal_repository.update_fill_price(signal_id, position.entry_price)
+
+                        # Сохраняем сделку в историю
+                        trade_data = {
+                            'signal_id': signal_id,
+                            'symbol': order.symbol,
+                            'direction': order.direction,
+                            'entry_price': position.entry_price,
+                            'quantity': order.quantity,
+                            'stop_loss': order.stop_loss,
+                            'take_profit': order.take_profit,
+                            'opened_at': position.opened_at,
+                            'status': 'OPEN',
+                            'order_type': 'LIMIT',
+                            'fill_price': position.entry_price
+                        }
+                        await trade_repository.save_trade(trade_data)
+
+                        # Публикуем событие
+                        await event_bus.publish(
+                            EventType.POSITION_OPENED,
+                            {
+                                'signal_id': signal_id,
+                                'symbol': order.symbol,
+                                'direction': order.direction,
+                                'entry_price': position.entry_price,
+                                'quantity': order.quantity,
+                                'stop_loss': order.stop_loss,
+                                'take_profit': order.take_profit,
+                                'order_type': 'LIMIT',
+                                'fill_price': position.entry_price
+                            },
+                            'position_manager'
+                        )
+
+                        logger.info(f"✅ Лимитный ордер #{signal_id} исполнен по цене {position.entry_price:.6f}")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка мониторинга лимитных ордеров: {e}")
+
+    async def _expire_limit_order(self, signal_id: int):
+        """Отменить истекший лимитный ордер"""
+        try:
+            order = self.pending_limit_orders.pop(signal_id, None)
+            if order:
+                await self.paper_account.expire_limit_order(signal_id)
+                await signal_repository.update_signal_status(signal_id, 'EXPIRED')
+
+                logger.info(f"⏰ Лимитный ордер #{signal_id} истек и отменен")
+
+                await event_bus.publish(
+                    EventType.ORDER_EXPIRED,
+                    {
+                        'signal_id': signal_id,
+                        'symbol': order.symbol,
+                        'direction': order.direction,
+                        'entry_price': order.entry_price
+                    },
+                    'position_manager'
+                )
+        except Exception as e:
+            logger.error(f"❌ Ошибка отмены лимитного ордера #{signal_id}: {e}")
 
     def _check_tp_sl(self, position: PaperPosition, current_price: float) -> Optional[str]:
         """Проверка достижения TP/SL"""
@@ -291,8 +443,13 @@ class PositionManager:
         """Проверка истечения времени жизни позиции"""
         if not position.expiration_time:
             return False
-
         return datetime.now() >= position.expiration_time
+
+    def _is_order_expired(self, order: PendingOrder) -> bool:
+        """Проверка истечения времени лимитного ордера"""
+        if not order.expiration_time:
+            return False
+        return datetime.now() >= order.expiration_time
 
     async def _close_position(self, signal_id: int, reason: str, close_price: float):
         """Закрытие позиции"""
@@ -336,8 +493,10 @@ class PositionManager:
                     )
 
                 # Публикуем событие
+                event_type = EventType.TP_HIT if reason == 'TP' else (
+                    EventType.SL_HIT if reason == 'SL' else EventType.POSITION_CLOSED)
                 await event_bus.publish(
-                    EventType.POSITION_CLOSED,
+                    event_type,
                     {
                         'signal_id': signal_id,
                         'symbol': position.symbol,
@@ -346,7 +505,8 @@ class PositionManager:
                         'close_price': close_price,
                         'pnl': closed_info['pnl'],
                         'pnl_percent': closed_info['pnl_percent'],
-                        'close_reason': reason
+                        'close_reason': reason,
+                        'order_type': position.order_type
                     },
                     'position_manager'
                 )
@@ -365,27 +525,72 @@ class PositionManager:
 
             for signal in active_signals:
                 signal_id = signal['id']
+                signal_subtype = signal.get('signal_subtype', 'LIMIT')
 
-                # Восстанавливаем позицию в Paper Account
-                position = PaperPosition(
-                    signal_id=signal_id,
-                    symbol=signal['symbol'],
-                    direction=signal['direction'],
-                    entry_price=signal['entry_price'],
-                    quantity=self.default_quantity,  # Временно, нужно хранить в БД
-                    stop_loss=signal['stop_loss'],
-                    take_profit=signal['take_profit'],
-                    expiration_time=signal.get('expiration_time'),
-                    opened_at=datetime.fromisoformat(signal['created_time']) if signal[
-                        'created_time'] else datetime.now()
-                )
-
-                self.open_positions[signal_id] = position
+                # Только ACTIVE позиции восстанавливаем
+                if signal.get('status') == 'ACTIVE':
+                    position = PaperPosition(
+                        signal_id=signal_id,
+                        symbol=signal['symbol'],
+                        direction=signal['direction'],
+                        entry_price=signal['entry_price'],
+                        quantity=signal.get('position_size', self.default_quantity),
+                        stop_loss=signal['stop_loss'],
+                        take_profit=signal['take_profit'],
+                        order_type=signal.get('order_type', 'MARKET'),
+                        fill_price=signal.get('fill_price', signal['entry_price']),
+                        expiration_time=datetime.fromisoformat(signal['expiration_time']) if signal.get(
+                            'expiration_time') else None,
+                        opened_at=datetime.fromisoformat(signal['created_time']) if signal[
+                            'created_time'] else datetime.now()
+                    )
+                    self.open_positions[signal_id] = position
 
             logger.info(f"🔄 Восстановлено {len(self.open_positions)} открытых позиций")
 
         except Exception as e:
             logger.error(f"Ошибка восстановления позиций: {e}")
+
+    async def _restore_pending_orders(self):
+        """Восстановление ожидающих лимитных ордеров из БД"""
+        try:
+            # Получаем PENDING сигналы
+            pending_signals = await signal_repository.get_pending_signals()
+
+            for signal in pending_signals:
+                signal_id = signal['id']
+                signal_subtype = signal.get('signal_subtype', 'LIMIT')
+
+                if signal_subtype == 'LIMIT' and signal.get('status') == 'PENDING':
+                    expiration_time = datetime.fromisoformat(signal['expiration_time']) if signal.get(
+                        'expiration_time') else None
+
+                    # Проверяем, не истек ли уже ордер
+                    if expiration_time and datetime.now() >= expiration_time:
+                        await signal_repository.update_signal_status(signal_id, 'EXPIRED')
+                        continue
+
+                    order = PendingOrder(
+                        signal_id=signal_id,
+                        symbol=signal['symbol'],
+                        direction=signal['direction'],
+                        entry_price=signal['entry_price'],
+                        quantity=signal.get('position_size', self.default_quantity),
+                        stop_loss=signal['stop_loss'],
+                        take_profit=signal['take_profit'],
+                        expiration_time=expiration_time,
+                        created_at=datetime.fromisoformat(signal['created_time']) if signal[
+                            'created_time'] else datetime.now()
+                    )
+                    self.pending_limit_orders[signal_id] = order
+
+                    # Восстанавливаем в Paper Account
+                    self.paper_account.pending_orders[signal_id] = order
+
+            logger.info(f"🔄 Восстановлено {len(self.pending_limit_orders)} ожидающих лимитных ордеров")
+
+        except Exception as e:
+            logger.error(f"Ошибка восстановления лимитных ордеров: {e}")
 
     async def cleanup(self):
         """Очистка ресурсов"""

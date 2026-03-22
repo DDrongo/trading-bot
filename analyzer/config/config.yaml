@@ -147,9 +147,6 @@ analysis:
     send_telegram_on_save: true
     stochastic_confidence_bonus: 0.05
     strong_confidence_threshold: 0.8
-  # ============================================================
-  # НОВАЯ СЕКЦИЯ: Типы сигналов (Фаза 1.2)
-  # ============================================================
   signal_types:
     watch:
       enabled: true
@@ -402,9 +399,6 @@ trade_executor:
 trading:
   max_position_per_symbol: 0.1
   max_risk_per_trade: 0.02
-# ============================================================
-# НОВАЯ СЕКЦИЯ: Управление позициями (Фаза 1.3)
-# ============================================================
 position_management:
   enabled: true
   monitoring_interval_seconds: 60
@@ -414,3 +408,16 @@ position_management:
   position_sizing:
     method: risk_based
     risk_per_trade_pct: 2.0
+
+# ============================================================
+# НОВАЯ СЕКЦИЯ: Настройки отображения (Фаза 1.3.1)
+# ============================================================
+display:
+  timezone_offset: 3  # часов от UTC (Москва +3, Киев +2, Лондон 0)
+  refresh_interval: 5  # секунд для автообновления монитора
+  date_format: "%d.%m.%Y"
+  time_format: "%H:%M:%S"
+  show_emojis: true
+  table_style: "unicode"  # unicode, simple, markdown
+  colors_enabled: true
+  max_symbols_per_page: 50
