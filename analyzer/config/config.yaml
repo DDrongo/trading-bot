@@ -1,4 +1,23 @@
+# analyzer/config/config.yaml
+# Конфигурация торгового бота
+# ФАЗА 1.3.6:
+# - Добавлена секция websocket
+# - Заменены limit/instant на m15
+# - Добавлены параметры для WATCH и M15
+
 analysis:
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+    - BNBUSDT
+    - XRPUSDT
+    - ADAUSDT
+    - DOGEUSDT
+    - AVAXUSDT
+    - DOTUSDT
+    - LINKUSDT
+
   adx_thresholds:
     moderate: 18.0
     sideways: 0.0
@@ -43,14 +62,14 @@ analysis:
     pivot_lookback: 20
     resistance_multiplier: 1.02
     support_candidate_lookback: 50
-  max_entry_distance_pct: 10.0
+  max_entry_distance_pct: 20.0
   max_risk_per_trade_pct: 2.0
   max_spread_pct: 2.0
   max_symbols_per_cycle: 50
   max_zone_distance_pct: 2.0
-  min_24h_volume_usd: 500000
-  min_price: 0.001
-  min_rr_ratio: 3.0
+  min_24h_volume_usd: 50000
+  min_price: 0.0001
+  min_rr_ratio: 1.5
   monitoring_interval_seconds: 60
   orchestration:
     continuous_analysis_interval: 15
@@ -120,9 +139,9 @@ analysis:
     tp_atr_multiplier: 4.0
     tp_safety_buffer_pct: 0.5
   screen1_adx_threshold: 20.0
-  screen1_min_confidence: 0.65
+  screen1_min_confidence: 0.5
   screen1_timeframe: D1
-  screen2_min_confidence: 0.6
+  screen2_min_confidence: 0.4
   screen2_timeframe: H4
   screen3_min_confidence: 0.7
   screen3_timeframe: M15
@@ -147,17 +166,20 @@ analysis:
     send_telegram_on_save: true
     stochastic_confidence_bonus: 0.05
     strong_confidence_threshold: 0.8
+
+  # ✅ ОБНОВЛЕНО для Фазы 1.3.6: Только WATCH и M15
   signal_types:
     watch:
       enabled: true
       conditions_required: 4
       total_conditions: 5
-    limit:
+      expiration_hours: 3  # WATCH живёт 3 часа
+    m15:
       min_rr_ratio: 3.0
-      expiration_hours: 24
-    instant:
-      min_rr_ratio: 2.0
       expiration_hours: 3
+      order_type: MARKET
+      max_slippage_pct: 1.0  # Максимальное отклонение цены для M15
+
   structure:
     lookback_period: 6
     ma_bounce_max_distance_pct: 2.0
@@ -191,6 +213,7 @@ analysis:
     strong_zones_bonus: 0.15
     volume_confirmation_bonus: 0.2
     zone_match_tolerance_pct: 1.0
+
 api:
   api_key: ${BYBIT_API_KEY}
   api_secret: ${BYBIT_API_SECRET}
@@ -214,6 +237,9 @@ api:
   testnet: false
   timeout: 30
   use_public_api: true
+
+market_type: linear
+
 database:
   backup:
     auto_backup_interval_days: 7
@@ -253,6 +279,7 @@ database:
   statistics:
     balance_history_points: 100
     starting_balance_statistics: 10000.0
+
 database_signals:
   backup:
     auto_backup_days: 7
@@ -272,7 +299,9 @@ database_signals:
     trades_days: 30
   signals_table: signals
   trades_table: trades
+
 mode: paper
+
 monitor:
   auto_clear_screen: true
   colors:
@@ -291,6 +320,7 @@ monitor:
   show_rr_ratio: true
   show_trend_info: true
   table_style: unicode
+
 paper_trading:
   balance_management:
     balance_history_limit: 100
@@ -320,6 +350,7 @@ paper_trading:
   telegram_alerts: true
   track_performance: true
   virtual_capital: 10000.0
+
 risk_management:
   check_correlation: false
   max_consecutive_losses: 3
@@ -329,6 +360,7 @@ risk_management:
   position_sizing_method: fixed_percentage
   trailing_stop_distance_pct: 2.0
   use_trailing_stop: false
+
 system:
   api_retry_attempts: 3
   api_retry_delay: 5
@@ -362,6 +394,7 @@ system:
     price_1_100: 3
     price_gt_100: 4
     price_lt_1: 2
+
 telegram:
   bot_token: 7972372871:AAFOa6ymCk0LHWFx7dv5PHGDw304M5XddGE
   chat_id: '-1003117183231'
@@ -385,6 +418,7 @@ telegram:
   send_system_alerts: true
   send_trade_alerts: true
   timeout: 10
+
 trade_executor:
   emergency_stop_enabled: true
   execution_timeout_seconds: 30
@@ -396,28 +430,35 @@ trade_executor:
   max_concurrent_executions: 3
   send_execution_notifications: true
   validate_before_execution: true
+
 trading:
   max_position_per_symbol: 0.1
   max_risk_per_trade: 0.02
+
 position_management:
   enabled: true
   monitoring_interval_seconds: 60
   default_quantity: 0.001
   max_quantity: 1.0
+  min_quantity: 0.0001
   max_positions: 5
   position_sizing:
     method: risk_based
     risk_per_trade_pct: 2.0
 
-# ============================================================
-# НОВАЯ СЕКЦИЯ: Настройки отображения (Фаза 1.3.1)
-# ============================================================
+# ✅ НОВАЯ СЕКЦИЯ для Фазы 1.3.6
+websocket:
+  enabled: true
+  reconnect_interval: 5
+  ping_interval: 20
+  ping_timeout: 10
+
 display:
-  timezone_offset: 3  # часов от UTC (Москва +3, Киев +2, Лондон 0)
-  refresh_interval: 5  # секунд для автообновления монитора
+  timezone_offset: 3
+  refresh_interval: 5
   date_format: "%d.%m.%Y"
   time_format: "%H:%M:%S"
   show_emojis: true
-  table_style: "unicode"  # unicode, simple, markdown
+  table_style: "unicode"
   colors_enabled: true
   max_symbols_per_page: 50

@@ -105,8 +105,9 @@ class Screen1TrendAnalyzer:
 
         try:
             if len(d1_klines) < self.min_candles_for_analysis:
-                logger.warning(
-                    f"Недостаточно D1 данных для {symbol}: {len(d1_klines)} < {self.min_candles_for_analysis}")
+                reason = f"недостаточно данных: {len(d1_klines)} свечей (мин: {self.min_candles_for_analysis})"
+                logger.warning(f"❌ {symbol}: ЭКРАН 1 не пройден — {reason}")
+                result.rejection_reason = reason
                 return result
 
             close_prices = [float(k[4]) for k in d1_klines]
@@ -124,7 +125,9 @@ class Screen1TrendAnalyzer:
             adx_data = self._calculate_adx(high_prices, low_prices, close_prices, self.adx_period)
 
             if not ema_50 or not ema_100:
-                logger.error("Не удалось рассчитать EMA для анализа тренда")
+                reason = "не удалось рассчитать EMA"
+                logger.error(f"❌ {symbol}: {reason}")
+                result.rejection_reason = reason
                 return result
 
             current_ema_50 = ema_50[-1] if len(ema_50) > 0 else 0
@@ -148,14 +151,21 @@ class Screen1TrendAnalyzer:
             result.indicators = trend_info['indicators']
             result.passed = self._check_screen1_passed(trend_info)
 
-            status = "✅" if result.passed else "❌"
-            logger.info(f"{status} {symbol} ЭКРАН 1: {result.trend_direction} {result.trend_strength} "
-                        f"(уверенность: {result.confidence_score:.1%}, ADX: {adx_data.get('adx', 0):.1f})")
+            # ✅ ДОБАВЛЕНО: логирование причины отказа для ЭКРАН 1
+            if not result.passed:
+                reason = f"{result.trend_direction} {result.trend_strength} (уверенность: {result.confidence_score:.1%}, ADX: {adx_data.get('adx', 0):.1f})"
+                logger.info(f"❌ {symbol}: ЭКРАН 1 не пройден — {reason}")
+                result.rejection_reason = reason
+            else:
+                status = "✅" if result.passed else "❌"
+                logger.info(f"{status} {symbol} ЭКРАН 1: {result.trend_direction} {result.trend_strength} "
+                            f"(уверенность: {result.confidence_score:.1%}, ADX: {adx_data.get('adx', 0):.1f})")
 
             return result
 
         except Exception as e:
             logger.error(f"❌ Ошибка анализа тренда для {symbol}: {e}")
+            result.rejection_reason = f"Ошибка: {str(e)}"
             return result
 
     @lru_cache(maxsize=128)

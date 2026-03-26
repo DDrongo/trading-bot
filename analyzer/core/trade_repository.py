@@ -1,6 +1,7 @@
-# analyzer/core/trade_repository.py
+# analyzer/core/trade_repository.py (ПОЛНОСТЬЮ - С МИГРАЦИЕЙ)
 """
 📊 TRADE REPOSITORY - Репозиторий для истории сделок
+ФАЗА 1.3.6.1: Добавлена миграция для колонок stop_loss и take_profit
 """
 
 import aiosqlite
@@ -23,7 +24,7 @@ class TradeRepository:
         self._initialized = False
 
     async def initialize(self) -> bool:
-        """Инициализация таблицы trades"""
+        """Инициализация таблицы trades с миграцией"""
         try:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
@@ -50,6 +51,18 @@ class TradeRepository:
                         FOREIGN KEY (signal_id) REFERENCES signals (id)
                     )
                 """)
+
+                # ✅ МИГРАЦИЯ: добавляем недостающие колонки
+                cursor = await conn.execute("PRAGMA table_info(trades)")
+                columns = [col[1] for col in await cursor.fetchall()]
+
+                if 'stop_loss' not in columns:
+                    await conn.execute("ALTER TABLE trades ADD COLUMN stop_loss REAL")
+                    logger.info("✅ Добавлена колонка stop_loss в таблицу trades")
+
+                if 'take_profit' not in columns:
+                    await conn.execute("ALTER TABLE trades ADD COLUMN take_profit REAL")
+                    logger.info("✅ Добавлена колонка take_profit в таблицу trades")
 
                 # Создаём индексы для быстрого поиска
                 await conn.execute(
@@ -209,7 +222,6 @@ class TradeRepository:
             async with aiosqlite.connect(self.db_path) as conn:
                 conn.row_factory = aiosqlite.Row
 
-                # Общая статистика
                 cursor = await conn.execute("""
                     SELECT 
                         COUNT(*) as total_trades,
@@ -224,7 +236,6 @@ class TradeRepository:
                 """)
                 stats = dict(await cursor.fetchone())
 
-                # Статистика по символам
                 cursor = await conn.execute("""
                     SELECT 
                         symbol,
@@ -240,7 +251,6 @@ class TradeRepository:
                 rows = await cursor.fetchall()
                 stats['by_symbol'] = [dict(row) for row in rows]
 
-                # Статистика по причинам закрытия
                 cursor = await conn.execute("""
                     SELECT 
                         close_reason,

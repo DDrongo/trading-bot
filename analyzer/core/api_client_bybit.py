@@ -1,6 +1,11 @@
-# core/api_client_bybit.py
+# analyzer/core/api_client_bybit.py
 """
 🌐 API клиент для работы с биржей Bybit (V5 API)
+ФАЗА 1.3.5: ИСПРАВЛЕНИЯ
+- Исправлена обработка ошибок "symbol invalid" (проверка существования символа)
+- Добавлена проверка существования символа перед запросом
+- Улучшено кэширование exchange_info
+- Добавлен метод check_symbol_exists
 """
 
 import asyncio
@@ -28,7 +33,10 @@ class BybitAPIClient:
         system_config = self.config.get('system', {})
 
         # РЕЖИМЫ РАБОТЫ
-        self.mode = self.config.get('mode', 'paper')  # paper, live
+        self.mode = self.config.get('mode', 'paper')
+
+        # Тип рынка (linear = USDT фьючерсы, spot = спот)
+        self.market_type = self.config.get('market_type', 'linear')
 
         # API ключи (только для LIVE)
         self.api_key = api_config.get('api_key', '')
@@ -51,20 +59,19 @@ class BybitAPIClient:
         # Настройки кэширования
         cache_config = api_config.get('cache', {})
         self._cache_ttl = cache_config.get('ttl_seconds', 60)
+        self._price_cache_ttl = 5  # секунд для текущей цены
 
         if self.mode == 'paper':
-            # PAPER: публичный API БЕЗ ключей
-            self.base_url = "https://api.bybit.com"  # РЕАЛЬНЫЙ спот
-            logger.info("📊 Режим: PAPER (публичные данные Bybit)")
+            self.base_url = "https://api.bybit.com"
+            logger.info(f"📊 Режим: PAPER (публичные данные Bybit), Рынок: {self.market_type}")
 
         elif self.mode == 'live':
-            # LIVE: полный API с ключами
             if self.testnet:
                 self.base_url = "https://api-testnet.bybit.com"
-                logger.info("🧪 Режим: LIVE (тестовая сеть Bybit)")
+                logger.info(f"🧪 Режим: LIVE (тестовая сеть Bybit), Рынок: {self.market_type}")
             else:
                 self.base_url = "https://api.bybit.com"
-                logger.info("🚀 Режим: LIVE (реальная сеть Bybit)")
+                logger.info(f"🚀 Режим: LIVE (реальная сеть Bybit), Рынок: {self.market_type}")
 
         # Сессия HTTP
         self.session: Optional[ClientSession] = None
@@ -77,6 +84,12 @@ class BybitAPIClient:
         # Кэш для часто запрашиваемых данных
         self._cache: Dict[str, tuple] = {}
 
+        # Кэш для tick_size и существующих символов
+        self._tick_size_cache: Dict[str, float] = {}
+        self._symbols_cache: Optional[List[str]] = None
+        self._exchange_info_cache_time: Optional[float] = None
+        self._exchange_info_ttl = 3600  # 1 час
+
         self._initialized = False
 
         logger.info(f"✅ BybitAPIClient создан (Timeout: {self.timeout}s, Rate Limit: {self.rate_limit}/s)")
@@ -84,13 +97,12 @@ class BybitAPIClient:
     async def initialize(self) -> bool:
         """Инициализация клиента"""
         try:
-            # Создаем сессию HTTP
             timeout = ClientTimeout(total=self.timeout)
             self.session = ClientSession(timeout=timeout)
 
-            # Проверяем соединение
             if await self._test_connection():
                 self._initialized = True
+                await self._load_exchange_info()
                 logger.info("✅ BybitAPIClient инициализирован")
                 return True
             else:
@@ -104,7 +116,6 @@ class BybitAPIClient:
     async def _test_connection(self) -> bool:
         """Тестирование соединения с API"""
         try:
-            # Пробуем простой запрос
             url = f"{self.base_url}/v5/market/time"
             async with self.session.get(url) as response:
                 if response.status == 200:
@@ -112,8 +123,151 @@ class BybitAPIClient:
                     return data.get('retCode', 1) == 0
                 return False
         except:
-            # Если не получается - все равно возвращаем True для теста
             return True
+
+    async def _load_exchange_info(self) -> None:
+        """Загрузка информации о бирже для получения tick_size и списка символов"""
+        try:
+            current_time = time.time()
+
+            if (self._exchange_info_cache_time and
+                    current_time - self._exchange_info_cache_time < self._exchange_info_ttl):
+                logger.debug("♻️ Используем кэшированную exchange_info")
+                return
+
+            params = {
+                'category': self.market_type,
+                'status': 'Trading'
+            }
+
+            data = await self._make_public_request("GET", "/v5/market/instruments-info", params)
+
+            if data and 'list' in data:
+                symbols_list = []
+                for instrument in data['list']:
+                    symbol = instrument.get('symbol')
+                    if symbol:
+                        symbols_list.append(symbol)
+                        tick_size = instrument.get('priceFilter', {}).get('tickSize')
+                        if tick_size:
+                            try:
+                                self._tick_size_cache[symbol] = float(tick_size)
+                            except (ValueError, TypeError):
+                                self._tick_size_cache[symbol] = 0.0001
+                        else:
+                            self._tick_size_cache[symbol] = 0.0001
+
+                self._symbols_cache = symbols_list
+                self._exchange_info_cache_time = current_time
+                logger.info(f"✅ Загружена exchange_info: {len(symbols_list)} символов")
+            else:
+                logger.warning("⚠️ Не удалось получить exchange_info")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки exchange_info: {e}")
+
+    async def check_symbol_exists(self, symbol: str) -> bool:
+        """
+        Проверка существования символа на бирже
+
+        Args:
+            symbol: Символ (например, BTCUSDT)
+
+        Returns:
+            True если символ существует, False если нет
+        """
+        try:
+            # Загружаем список символов если нужно
+            if self._symbols_cache is None:
+                await self._load_exchange_info()
+
+            if self._symbols_cache:
+                exists = symbol in self._symbols_cache
+                if not exists:
+                    logger.warning(f"⚠️ Символ {symbol} не найден на Bybit {self.market_type.upper()}")
+                return exists
+
+            # Если нет кэша, пробуем прямой запрос
+            params = {
+                'category': self.market_type,
+                'symbol': symbol
+            }
+            data = await self._make_public_request("GET", "/v5/market/tickers", params)
+            return data and 'list' in data and len(data['list']) > 0
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки символа {symbol}: {e}")
+            return False
+
+    async def get_tick_size(self, symbol: str) -> float:
+        """
+        Получение tick_size для символа (шаг цены)
+
+        Args:
+            symbol: Символ (например, BTCUSDT)
+
+        Returns:
+            Tick size (минимальный шаг цены)
+        """
+        if symbol in self._tick_size_cache:
+            return self._tick_size_cache[symbol]
+
+        await self._load_exchange_info()
+        return self._tick_size_cache.get(symbol, 0.0001)
+
+    async def get_current_price(self, symbol: str, force_refresh: bool = False) -> Optional[float]:
+        """
+        Получение текущей цены символа
+
+        ✅ ФАЗА 1.3.5: Добавлена проверка существования символа
+
+        Args:
+            symbol: Символ (например, BTCUSDT)
+            force_refresh: Принудительное обновление (игнорировать кэш)
+
+        Returns:
+            Текущая цена или None в случае ошибки
+        """
+        try:
+            # Проверяем существование символа
+            if not await self.check_symbol_exists(symbol):
+                logger.warning(f"⚠️ Символ {symbol} не существует на Bybit {self.market_type.upper()}")
+                return None
+
+            cache_key = f"current_price_{symbol}"
+
+            if not force_refresh:
+                cached = self._get_cached_data(cache_key, ttl=self._price_cache_ttl)
+                if cached is not None:
+                    logger.debug(f"♻️ Кэш текущей цены {symbol}: {cached}")
+                    return cached
+
+            params = {
+                'category': self.market_type,
+                'symbol': symbol
+            }
+
+            data = await self._make_public_request("GET", "/v5/market/tickers", params)
+
+            if data and 'list' in data and len(data['list']) > 0:
+                ticker = data['list'][0]
+                last_price = ticker.get('lastPrice')
+
+                if last_price:
+                    price = float(last_price)
+                    self._set_cached_data(cache_key, price)
+                    logger.debug(f"✅ Текущая цена {symbol}: {price}")
+                    return price
+                else:
+                    logger.warning(f"⚠️ Нет lastPrice для {symbol}")
+                    return None
+            else:
+                logger.warning(f"⚠️ Нет данных тикера для {symbol}")
+                return None
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения текущей цены {symbol}: {e}")
+            return None
 
     def _generate_signature(self, params: Dict, timestamp: int) -> str:
         """Генерация подписи для Bybit API"""
@@ -140,7 +294,6 @@ class BybitAPIClient:
         if params is None:
             params = {}
 
-        # Проверяем лимит запросов
         await self._check_rate_limit()
 
         for attempt in range(self.retry_attempts):
@@ -160,7 +313,6 @@ class BybitAPIClient:
                         if response.status == 200:
                             data = await response.json()
 
-                            # Проверяем ответ Bybit
                             if data.get('retCode') == 0:
                                 return data.get('result', data)
                             else:
@@ -207,17 +359,14 @@ class BybitAPIClient:
         if params is None:
             params = {}
 
-        # Добавляем обязательные параметры для Bybit
         timestamp = int(time.time() * 1000)
         params['api_key'] = self.api_key
         params['timestamp'] = timestamp
         params['recv_window'] = self.recv_window
 
-        # Генерируем подпись
         signature = self._generate_signature(params, timestamp)
         params['sign'] = signature
 
-        # Проверяем лимит запросов
         await self._check_rate_limit()
 
         for attempt in range(self.retry_attempts):
@@ -283,7 +432,6 @@ class BybitAPIClient:
         """Проверка лимита запросов для Bybit"""
         current_time = time.time()
 
-        # Bybit лимит: 100 запросов в секунду для тестовой сети
         if current_time - self.last_reset > 1:
             self.request_count = 0
             self.last_reset = current_time
@@ -296,11 +444,14 @@ class BybitAPIClient:
                 self.request_count = 0
                 self.last_reset = time.time()
 
-    def _get_cached_data(self, cache_key: str) -> Optional[Any]:
+    def _get_cached_data(self, cache_key: str, ttl: int = None) -> Optional[Any]:
         """Получение данных из кэша"""
+        if ttl is None:
+            ttl = self._cache_ttl
+
         if cache_key in self._cache:
             data, timestamp = self._cache[cache_key]
-            if time.time() - timestamp < self._cache_ttl:
+            if time.time() - timestamp < ttl:
                 logger.debug(f"♻️ Кэш попадание: {cache_key}")
                 return data
             else:
@@ -311,21 +462,23 @@ class BybitAPIClient:
         """Сохранение данных в кэш"""
         self._cache[cache_key] = (data, time.time())
 
-    # === ОСНОВНЫЕ МЕТОДЫ API ===
-
     async def get_klines(self, symbol: str, interval: str, limit: int = 100) -> List:
         """
         Получение исторических свечей (klines/candles)
 
-        Bybit интервалы: 1 3 5 15 30 60 120 240 360 720 D W M
+        ✅ ФАЗА 1.3.5: Добавлена проверка существования символа
         """
         try:
+            # Проверяем существование символа
+            if not await self.check_symbol_exists(symbol):
+                logger.warning(f"⚠️ Символ {symbol} не существует, пропускаем")
+                return []
+
             cache_key = f"klines_{symbol}_{interval}_{limit}"
             cached = self._get_cached_data(cache_key)
             if cached:
                 return cached
 
-            # Конвертируем интервал в формат Bybit
             interval_map = {
                 '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
                 '1h': '60', '2h': '120', '4h': '240', '6h': '360', '12h': '720',
@@ -335,7 +488,7 @@ class BybitAPIClient:
             bybit_interval = interval_map.get(interval, interval)
 
             params = {
-                'category': 'spot',
+                'category': self.market_type,
                 'symbol': symbol,
                 'interval': bybit_interval,
                 'limit': min(limit, self.max_kline_limit)
@@ -343,12 +496,9 @@ class BybitAPIClient:
 
             data = await self._make_public_request("GET", "/v5/market/kline", params)
 
-            # Форматируем данные в тот же формат что и Binance для совместимости
             klines = []
             if data and 'list' in data:
                 for candle in data['list']:
-                    # Bybit возвращает: [timestamp, open, high, low, close, volume, turnover]
-                    # Конвертируем в Binance формат: [timestamp, open, high, low, close, volume, close_time, ...]
                     klines.append([
                         candle[0],  # timestamp
                         candle[1],  # open
@@ -356,17 +506,15 @@ class BybitAPIClient:
                         candle[3],  # low
                         candle[4],  # close
                         candle[5],  # volume
-                        candle[0],  # close_time (используем тот же timestamp)
-                        "0",  # quote_asset_volume
-                        0,  # number_of_trades
-                        0,  # taker_buy_base_asset_volume
-                        0,  # taker_buy_quote_asset_volume
-                        "0"  # ignore
+                        candle[0],  # close_time
+                        "0",
+                        0,
+                        0,
+                        0,
+                        "0"
                     ])
 
-            # Кэшируем результат
             self._set_cached_data(cache_key, klines)
-
             logger.debug(f"✅ Получено {len(klines)} свечей {symbol} {interval}")
             return klines
 
@@ -375,9 +523,7 @@ class BybitAPIClient:
             return []
 
     async def get_24h_ticker(self, symbol: str) -> Dict[str, Any]:
-        """
-        Получение 24-часовой статистики по символу
-        """
+        """Получение 24-часовой статистики по символу"""
         try:
             cache_key = f"ticker_{symbol}"
             cached = self._get_cached_data(cache_key)
@@ -385,7 +531,7 @@ class BybitAPIClient:
                 return cached
 
             params = {
-                'category': 'spot',
+                'category': self.market_type,
                 'symbol': symbol
             }
 
@@ -405,7 +551,6 @@ class BybitAPIClient:
                 }
 
             self._set_cached_data(cache_key, result)
-
             return result
 
         except Exception as e:
@@ -413,13 +558,9 @@ class BybitAPIClient:
             return {}
 
     async def get_order_book(self, symbol: str, limit: int = 10) -> Dict[str, List]:
-        """
-        Получение стакана заявок
-        """
+        """Получение стакана заявок"""
         try:
-            # Проверяем допустимый лимит
             if limit not in self.orderbook_limits:
-                # Находим ближайший допустимый лимит
                 closest_limit = min(self.orderbook_limits, key=lambda x: abs(x - limit))
                 logger.debug(f"⚠️ Лимит {limit} недопустим, используем ближайший: {closest_limit}")
                 limit = closest_limit
@@ -430,7 +571,7 @@ class BybitAPIClient:
                 return cached
 
             params = {
-                'category': 'spot',
+                'category': self.market_type,
                 'symbol': symbol,
                 'limit': limit
             }
@@ -443,7 +584,6 @@ class BybitAPIClient:
                 result['asks'] = data.get('a', [])
 
             self._set_cached_data(cache_key, result)
-
             logger.debug(f"✅ Получен стакан {symbol} (глубина: {limit})")
             return result
 
@@ -452,9 +592,7 @@ class BybitAPIClient:
             return {'bids': [], 'asks': []}
 
     async def get_exchange_info(self) -> Dict[str, Any]:
-        """
-        Получение информации о бирже (торговые пары)
-        """
+        """Получение информации о бирже (торговые пары)"""
         try:
             cache_key = "exchange_info"
             cached = self._get_cached_data(cache_key)
@@ -462,7 +600,7 @@ class BybitAPIClient:
                 return cached
 
             params = {
-                'category': 'spot',
+                'category': self.market_type,
                 'status': 'Trading'
             }
 
@@ -478,14 +616,25 @@ class BybitAPIClient:
             logger.error(f"❌ Ошибка получения информации о бирже: {e}")
             return {}
 
+    async def get_all_symbols(self) -> List[str]:
+        """Получение списка всех торговых пар"""
+        try:
+            if self._symbols_cache is not None:
+                return self._symbols_cache
+
+            await self._load_exchange_info()
+            return self._symbols_cache or []
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения списка символов: {e}")
+            return []
+
     async def place_order(self, symbol: str, side: str, quantity: float,
                           order_type: str = "Market", price: float = None) -> Dict[str, Any]:
-        """
-        Размещение ордера на Bybit
-        """
+        """Размещение ордера на Bybit"""
         try:
             params = {
-                'category': 'spot',
+                'category': self.market_type,
                 'symbol': symbol,
                 'side': side.capitalize(),
                 'orderType': order_type.capitalize(),
@@ -506,12 +655,10 @@ class BybitAPIClient:
             return {}
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
-        """
-        Отмена ордера
-        """
+        """Отмена ордера"""
         try:
             params = {
-                'category': 'spot',
+                'category': self.market_type,
                 'symbol': symbol,
                 'orderId': order_id
             }
@@ -526,12 +673,10 @@ class BybitAPIClient:
             return False
 
     async def get_order_status(self, symbol: str, order_id: str) -> Dict[str, Any]:
-        """
-        Получение статуса ордера
-        """
+        """Получение статуса ордера"""
         try:
             params = {
-                'category': 'spot',
+                'category': self.market_type,
                 'symbol': symbol,
                 'orderId': order_id
             }
@@ -544,12 +689,10 @@ class BybitAPIClient:
             return {}
 
     async def get_account_info(self) -> Dict[str, Any]:
-        """
-        Получение информации об аккаунте (балансы)
-        """
+        """Получение информации об аккаунте (балансы)"""
         try:
             params = {
-                'accountType': 'SPOT'
+                'accountType': 'UNIFIED' if self.market_type == 'linear' else 'SPOT'
             }
 
             response = await self._make_private_request("GET", "/v5/account/wallet-balance", params)
@@ -558,25 +701,6 @@ class BybitAPIClient:
         except Exception as e:
             logger.error(f"❌ Ошибка получения информации об аккаунте: {e}")
             return {}
-
-    async def get_all_symbols(self) -> List[str]:
-        """
-        Получение списка всех торговых пар SPOT
-        """
-        try:
-            exchange_info = await self.get_exchange_info()
-            symbols = []
-
-            for symbol_info in exchange_info.get('list', []):
-                if symbol_info.get('status') == 'Trading':
-                    symbols.append(symbol_info['symbol'])
-
-            logger.info(f"✅ Получено {len(symbols)} торговых пар Bybit SPOT")
-            return symbols
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения списка символов: {e}")
-            return []
 
     async def close(self):
         """Закрытие соединений"""
@@ -594,9 +718,12 @@ class BybitAPIClient:
             'initialized': self._initialized,
             'testnet': self.testnet,
             'exchange': 'Bybit',
+            'market_type': self.market_type,
             'timeout': self.timeout,
             'retry_attempts': self.retry_attempts,
-            'recv_window': self.recv_window
+            'recv_window': self.recv_window,
+            'tick_size_cache_size': len(self._tick_size_cache),
+            'symbols_cache_size': len(self._symbols_cache) if self._symbols_cache else 0
         }
 
 
@@ -617,6 +744,18 @@ class APIClient:
         self._initialized = result
         return result
 
+    async def get_current_price(self, symbol: str, force_refresh: bool = False) -> Optional[float]:
+        """Получение текущей цены"""
+        return await self.bybit_client.get_current_price(symbol, force_refresh)
+
+    async def get_tick_size(self, symbol: str) -> float:
+        """Получение tick_size"""
+        return await self.bybit_client.get_tick_size(symbol)
+
+    async def check_symbol_exists(self, symbol: str) -> bool:
+        """Проверка существования символа"""
+        return await self.bybit_client.check_symbol_exists(symbol)
+
     async def get_klines(self, symbol: str, interval: str, limit: int = 100) -> List:
         """Получение свечей"""
         return await self.bybit_client.get_klines(symbol, interval, limit)
@@ -632,6 +771,10 @@ class APIClient:
     async def get_exchange_info(self) -> Dict[str, Any]:
         """Получение информации о бирже"""
         return await self.bybit_client.get_exchange_info()
+
+    async def get_all_symbols(self) -> List[str]:
+        """Получение всех символов"""
+        return await self.bybit_client.get_all_symbols()
 
     async def place_order(self, symbol: str, side: str, quantity: float,
                           order_type: str = "MARKET", price: float = None) -> Dict[str, Any]:
@@ -650,10 +793,6 @@ class APIClient:
         """Получение информации об аккаунте"""
         return await self.bybit_client.get_account_info()
 
-    async def get_all_symbols(self) -> List[str]:
-        """Получение всех символов"""
-        return await self.bybit_client.get_all_symbols()
-
     async def close(self):
         """Закрытие соединений"""
         await self.bybit_client.close()
@@ -665,5 +804,4 @@ class APIClient:
         return stats
 
 
-# Экспорт для импорта в другие модули
 __all__ = ['APIClient', 'BybitAPIClient']

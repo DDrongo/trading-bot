@@ -1,6 +1,11 @@
 # core/__init__.py
 """
 🎯 Пакет core - основные модули анализатора
+
+HOTFIX 1.3.6.2:
+- Исправлен импорт Screen2Analyzer (был Screen2EntryZonesAnalyzer)
+- Screen2Result импортируется из data_classes
+- Добавлен алиас для обратной совместимости
 """
 
 # Экспортируем все основные классы для удобного импорта
@@ -13,11 +18,19 @@ from .data_classes import (
 from .event_bus import EventType, Event, EventBus, event_bus
 from .prefilter_liquidity import LiquidityPrefilter, PrefilterResult, LiquidityMetrics
 from .screen1_trend_analyzer import Screen1TrendAnalyzer, Screen1Result
-from .screen2_entry_zones import Screen2EntryZonesAnalyzer, Screen2Result
+
+# ✅ ИСПРАВЛЕНО: импортируем Screen2Analyzer (реальное имя класса)
+# Screen2Result уже импортирован из data_classes выше
+from .screen2_entry_zones import Screen2Analyzer
+
 from .screen3_signal_generator import Screen3SignalGenerator, Screen3Result, PatternType
 from .signal_repository import SignalRepository, signal_repository
 from .three_screen_analyzer import ThreeScreenAnalyzer
 from .orchestrator import AnalysisOrchestrator, AnalysisSession
+
+# ✅ ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ
+# Если какой-то код использует старое имя Screen2EntryZonesAnalyzer
+Screen2EntryZonesAnalyzer = Screen2Analyzer
 
 __all__ = [
     # API
@@ -47,10 +60,12 @@ __all__ = [
     'PrefilterResult',
     'LiquidityMetrics',
     'Screen1TrendAnalyzer',
-    'Screen2EntryZonesAnalyzer',
+    'Screen2Analyzer',           # ← новое имя (правильное)
+    'Screen2EntryZonesAnalyzer', # ← оставлено для обратной совместимости
     'Screen3SignalGenerator',
     'PatternType',
     'SignalRepository',
+    'signal_repository',
     'ThreeScreenAnalyzer',
     'AnalysisOrchestrator',
     'AnalysisSession'

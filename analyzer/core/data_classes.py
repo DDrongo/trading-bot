@@ -1,6 +1,10 @@
-# core/data_classes.py
+# analyzer/core/data_classes.py (ПОЛНОСТЬЮ - ОБНОВЛЁННАЯ ВЕРСИЯ)
 """
 🏷️ КЛАССЫ ДАННЫХ ДЛЯ СИГНАЛОВ И СДЕЛОК
+ФАЗА 1.3.6:
+- Добавлен SignalType.M15 (вместо LIMIT/INSTANT)
+- Добавлены поля zone_* в ThreeScreenAnalysis
+- Обновлён Screen2Result для zone_*
 """
 
 from dataclasses import dataclass, field, asdict
@@ -18,10 +22,11 @@ class Direction(Enum):
 
 class SignalStatus(Enum):
     """Статус сигнала"""
-    PENDING = "PENDING"
-    EXECUTED = "EXECUTED"
-    CANCELLED = "CANCELLED"
+    WATCH = "WATCH"
+    ACTIVE = "ACTIVE"
+    CLOSED = "CLOSED"
     EXPIRED = "EXPIRED"
+    REJECTED = "REJECTED"
 
 
 class TradeStatus(Enum):
@@ -32,10 +37,9 @@ class TradeStatus(Enum):
 
 
 class SignalType(Enum):
-    """Типы сигналов (НОВОЕ для Фазы 1.2)"""
-    WATCH = "WATCH"      # Пре-сигнал (4 из 5 условий), без SL/TP
-    LIMIT = "LIMIT"      # Среднесрочный сигнал (24 часа, R/R ≥ 3:1)
-    INSTANT = "INSTANT"  # Быстрый сигнал (3 часа, R/R ≥ 2:1)
+    """Типы сигналов (Фаза 1.3.6)"""
+    WATCH = "WATCH"  # Пре-сигнал (монета в зоне интереса)
+    M15 = "M15"  # Торговый сигнал (рыночный ордер, 3ч, R/R ≥ 3:1)
 
 
 # ========== SCREEN RESULTS ==========
@@ -50,6 +54,7 @@ class Screen1Result:
     indicators: Dict[str, Any] = field(default_factory=dict)
     confidence_score: float = 0.0
     passed: bool = False
+    rejection_reason: str = ""
 
 
 @dataclass
@@ -60,9 +65,15 @@ class Screen2Result:
     invalidated_zones: List[float] = field(default_factory=list)
     fib_levels: Dict[str, float] = field(default_factory=dict)
     volume_confirmation: bool = False
-    watch_signal: Optional[Dict] = None  # НОВОЕ для Фазы 1.2
     passed: bool = False
     confidence: float = 0.0
+    rejection_reason: str = ""
+
+    # ✅ НОВЫЕ ПОЛЯ для Фазы 1.3.6
+    zone_low: float = 0.0
+    zone_high: float = 0.0
+    screen2_score: int = 0
+    expected_pattern: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -71,9 +82,12 @@ class Screen2Result:
             "invalidated_zones": self.invalidated_zones,
             "fib_levels": self.fib_levels,
             "volume_confirmation": self.volume_confirmation,
-            "watch_signal": self.watch_signal,  # НОВОЕ
             "passed": self.passed,
-            "confidence": self.confidence
+            "confidence": self.confidence,
+            "zone_low": self.zone_low,
+            "zone_high": self.zone_high,
+            "screen2_score": self.screen2_score,
+            "expected_pattern": self.expected_pattern
         }
 
 
@@ -81,7 +95,7 @@ class Screen2Result:
 class Screen3Result:
     """Результат анализа 3-го экрана (сигналы)"""
     signal_type: str = ""  # BUY/SELL
-    signal_subtype: str = "LIMIT"  # НОВОЕ: WATCH/LIMIT/INSTANT
+    signal_subtype: str = "M15"  # M15 (только один тип)
     entry_price: float = 0.0
     stop_loss: float = 0.0
     take_profit: float = 0.0
@@ -91,11 +105,13 @@ class Screen3Result:
     expiration_time: Optional[datetime] = None
     passed: bool = False
     indicators: Dict[str, Any] = field(default_factory=dict)
+    rejection_reason: str = ""
+    order_type: str = "MARKET"  # Всегда MARKET для M15
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "signal_type": self.signal_type,
-            "signal_subtype": self.signal_subtype,  # НОВОЕ
+            "signal_subtype": self.signal_subtype,
             "entry_price": self.entry_price,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
@@ -104,7 +120,8 @@ class Screen3Result:
             "confidence": self.confidence,
             "expiration_time": self.expiration_time.isoformat() if self.expiration_time else None,
             "passed": self.passed,
-            "indicators": self.indicators
+            "indicators": self.indicators,
+            "order_type": self.order_type
         }
 
 
@@ -117,8 +134,15 @@ class ThreeScreenAnalysis:
     overall_confidence: float = 0.0
     risk_reward_ratio: float = 0.0
     symbol: str = ""
-    signal_type: SignalType = SignalType.LIMIT  # НОВОЕ для Фазы 1.2
+    signal_type: SignalType = SignalType.M15
     timestamp: datetime = field(default_factory=datetime.now)
+    should_trade: bool = False
+
+    # ✅ НОВЫЕ ПОЛЯ для Фазы 1.3.6 (из Screen2 для сохранения)
+    zone_low: float = 0.0
+    zone_high: float = 0.0
+    expected_pattern: str = ""
+    screen2_score: int = 0
 
 
 # ========== SIGNALS AND TRADES ==========
@@ -131,7 +155,7 @@ class Signal:
     symbol: str
     strategy: str = 'three_screen'
     direction: Direction = Direction.LONG
-    status: SignalStatus = SignalStatus.PENDING
+    status: SignalStatus = SignalStatus.WATCH
     confidence: float = 0.0
     three_screen_analysis: Optional[ThreeScreenAnalysis] = None
     entry_prices: List[float] = field(default_factory=list)
@@ -236,7 +260,7 @@ class SignalModel:
     id: Optional[int] = None
     symbol: str = ""
     signal_type: str = ""  # BUY/SELL
-    signal_subtype: str = "LIMIT"  # НОВОЕ: WATCH/LIMIT/INSTANT
+    signal_subtype: str = "M15"
     entry_price: float = 0.0
     stop_loss: float = 0.0
     take_profit: float = 0.0
@@ -245,6 +269,10 @@ class SignalModel:
     status: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    zone_low: float = 0.0
+    zone_high: float = 0.0
+    expected_pattern: str = ""
+    screen2_score: int = 0
 
 
 @dataclass
@@ -278,16 +306,19 @@ def three_screen_analysis_to_dict(self) -> Dict[str, Any]:
         'screen2': {
             'entry_zones': self.screen2.entry_zones,
             'best_zone': self.screen2.best_zone,
-            'momentum': self.screen2.momentum,
-            'retracement_depth': self.screen2.retracement_depth,
-            'key_levels': self.screen2.key_levels,
+            'invalidated_zones': self.screen2.invalidated_zones,
+            'fib_levels': self.screen2.fib_levels,
+            'volume_confirmation': self.screen2.volume_confirmation,
             'confidence': self.screen2.confidence,
-            'watch_signal': self.screen2.watch_signal,  # НОВОЕ
-            'passed': self.screen2.passed
+            'passed': self.screen2.passed,
+            'zone_low': self.screen2.zone_low,
+            'zone_high': self.screen2.zone_high,
+            'screen2_score': self.screen2.screen2_score,
+            'expected_pattern': self.screen2.expected_pattern
         },
         'screen3': {
             'signal_type': self.screen3.signal_type,
-            'signal_subtype': self.screen3.signal_subtype,  # НОВОЕ
+            'signal_subtype': self.screen3.signal_subtype,
             'entry_price': self.screen3.entry_price,
             'stop_loss': self.screen3.stop_loss,
             'take_profit': self.screen3.take_profit,
@@ -295,13 +326,18 @@ def three_screen_analysis_to_dict(self) -> Dict[str, Any]:
             'trigger_pattern': self.screen3.trigger_pattern,
             'confidence': self.screen3.confidence,
             'expiration_time': self.screen3.expiration_time.isoformat() if self.screen3.expiration_time else None,
-            'passed': self.screen3.passed
+            'passed': self.screen3.passed,
+            'order_type': self.screen3.order_type
         },
         'overall_confidence': self.overall_confidence,
         'risk_reward_ratio': self.risk_reward_ratio,
         'symbol': self.symbol,
-        'signal_type': self.signal_type.value,  # НОВОЕ
-        'timestamp': self.timestamp.isoformat() if self.timestamp else None
+        'signal_type': self.signal_type.value,
+        'timestamp': self.timestamp.isoformat() if self.timestamp else None,
+        'zone_low': self.zone_low,
+        'zone_high': self.zone_high,
+        'expected_pattern': self.expected_pattern,
+        'screen2_score': self.screen2_score
     }
 
 
@@ -322,12 +358,15 @@ def screen2_result_to_dict(self) -> Dict[str, Any]:
     return {
         'entry_zones': self.entry_zones,
         'best_zone': self.best_zone,
-        'momentum': self.momentum,
-        'retracement_depth': self.retracement_depth,
-        'key_levels': self.key_levels,
+        'invalidated_zones': self.invalidated_zones,
+        'fib_levels': self.fib_levels,
+        'volume_confirmation': self.volume_confirmation,
         'confidence': self.confidence,
-        'watch_signal': self.watch_signal,  # НОВОЕ
-        'passed': self.passed
+        'passed': self.passed,
+        'zone_low': self.zone_low,
+        'zone_high': self.zone_high,
+        'screen2_score': self.screen2_score,
+        'expected_pattern': self.expected_pattern
     }
 
 
@@ -335,7 +374,7 @@ def screen3_result_to_dict(self) -> Dict[str, Any]:
     """Метод to_dict для Screen3Result"""
     return {
         'signal_type': self.signal_type,
-        'signal_subtype': self.signal_subtype,  # НОВОЕ
+        'signal_subtype': self.signal_subtype,
         'entry_price': self.entry_price,
         'stop_loss': self.stop_loss,
         'take_profit': self.take_profit,
@@ -343,7 +382,8 @@ def screen3_result_to_dict(self) -> Dict[str, Any]:
         'trigger_pattern': self.trigger_pattern,
         'confidence': self.confidence,
         'expiration_time': self.expiration_time.isoformat() if self.expiration_time else None,
-        'passed': self.passed
+        'passed': self.passed,
+        'order_type': self.order_type
     }
 
 
@@ -358,7 +398,7 @@ __all__ = [
     'Direction',
     'SignalStatus',
     'TradeStatus',
-    'SignalType',  # НОВОЕ
+    'SignalType',
 
     # Screen Results
     'Screen1Result',
