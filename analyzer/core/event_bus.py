@@ -1,6 +1,8 @@
-# analyzer/core/event_bus.py (обновлённый - ПОЛНОСТЬЮ)
+# analyzer/core/event_bus.py (ПОЛНОСТЬЮ - ФАЗА 1.3.8)
 """
 🔌 Шина событий для связи между модулями
+ФАЗА 1.3.8:
+- Добавлены события WATCH_CREATED, WATCH_EXPIRED, WATCH_UPDATED
 """
 
 import asyncio
@@ -23,6 +25,11 @@ class EventType(Enum):
     TRADING_SIGNAL_GENERATED = "TRADING_SIGNAL_GENERATED"
     SIGNAL_EXPIRED = "SIGNAL_EXPIRED"
     SIGNAL_CANCELLED = "SIGNAL_CANCELLED"
+
+    # WATCH события (ФАЗА 1.3.8)
+    WATCH_CREATED = "WATCH_CREATED"
+    WATCH_EXPIRED = "WATCH_EXPIRED"
+    WATCH_UPDATED = "WATCH_UPDATED"
 
     # Торговля
     TRADE_EXECUTED = "TRADE_EXECUTED"
@@ -181,7 +188,9 @@ class EventBus:
 
         # Логируем важные события
         if event_type in [EventType.ERROR_OCCURRED, EventType.TRADING_SIGNAL_GENERATED,
-                          EventType.TRADE_EXECUTED, EventType.POSITION_OPENED, EventType.POSITION_CLOSED]:
+                          EventType.TRADE_EXECUTED, EventType.POSITION_OPENED,
+                          EventType.POSITION_CLOSED, EventType.WATCH_CREATED,
+                          EventType.WATCH_EXPIRED]:
             logger.info(f"📢 {event_type.value}: {data.get('symbol', 'system')}")
 
         # Добавляем в очередь на обработку

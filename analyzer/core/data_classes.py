@@ -7,11 +7,11 @@
 - Обновлён Screen2Result для zone_*
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from enum import Enum
-import json
+
 
 
 class Direction(Enum):

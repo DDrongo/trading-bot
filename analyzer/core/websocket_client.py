@@ -8,8 +8,7 @@ import asyncio
 import json
 import logging
 import websockets
-from typing import List, Dict, Optional, Callable, Any
-from datetime import datetime
+from typing import List, Dict, Callable, Any
 
 logger = logging.getLogger('websocket_client')
 

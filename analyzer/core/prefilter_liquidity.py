@@ -1,7 +1,10 @@
-
-# core/prefilter_liquidity.py
+# analyzer/core/prefilter_liquidity.py
 """
 🎯 ПРЕФИЛЬТР ЛИКВИДНОСТИ - быстрая проверка перед трехэкранным анализом
+ФАЗА 1.3.8:
+- Добавлен публичный метод clear_cache() для очистки кэша
+- Исправлена обработка ошибок при парсинге данных
+- Улучшено логирование
 """
 
 import logging
@@ -9,6 +12,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Optional, Tuple
 from datetime import datetime, timedelta
+
+from analyzer.core.data_provider import data_provider
 
 logger = logging.getLogger('liquidity_prefilter')
 
@@ -64,10 +69,20 @@ class PrefilterResult:
 class LiquidityPrefilter:
     """
     Быстрая проверка ликвидности перед дорогим трехэкранным анализом
+    ФАЗА 1.3.8: Использует DataProvider, добавлен clear_cache()
     """
 
-    def __init__(self, api_client, config=None):
-        self.api = api_client
+    def __init__(self, data_provider_instance=None, config=None):
+        """
+        Args:
+            data_provider_instance: Экземпляр DataProvider (опционально, используется глобальный)
+            config: Конфигурация
+        """
+        self.data_provider = data_provider_instance or data_provider
+        if self.data_provider is None:
+            from analyzer.core.data_provider import data_provider as global_dp
+            self.data_provider = global_dp
+
         self.config = config or {}
 
         # Получаем конфигурацию из секции analysis.prefilter
@@ -97,8 +112,8 @@ class LiquidityPrefilter:
         self._checked_symbols: Dict[str, LiquidityMetrics] = {}
         self._cache_ttl_hours = prefilter_config.get('cache_ttl_hours', 1)
 
-        logger.info(f"✅ LiquidityPrefilter создан. "
-                    f"Минимум: ${self.MIN_24H_VOLUME_USD:,.0f}, "
+        logger.info(f"✅ LiquidityPrefilter создан (Фаза 1.3.8) — использует DataProvider")
+        logger.info(f"   Минимум: ${self.MIN_24H_VOLUME_USD:,.0f}, "
                     f"цена > ${self.MIN_PRICE:.2f}, "
                     f"порог цены: ${self.MIN_PRICE_THRESHOLD:.2f}, "
                     f"размер пачки: {self.BATCH_SIZE}")
@@ -153,7 +168,6 @@ class LiquidityPrefilter:
         result.filtered_symbols = passed_symbols
         result.execution_time_seconds = (datetime.now() - start_time).total_seconds()
 
-        # 🔧 ИСПРАВЛЕНИЕ БАГА: защита от деления на ноль
         if result.total_symbols > 0:
             passed_percent = result.passed_symbols / result.total_symbols * 100
         else:
@@ -194,24 +208,24 @@ class LiquidityPrefilter:
             return symbol, LiquidityMetrics(
                 symbol=symbol,
                 passed=False,
-                fail_reason=f"Ошибка проверки: {str(e)[:50]}"  # 🔧 Ограничение длины
+                fail_reason=f"Ошибка проверки: {str(e)[:50]}"
             )
 
     async def _check_symbol_liquidity(self, symbol: str) -> LiquidityMetrics:
-        """Проверка ликвидности одного символа"""
+        """Проверка ликвидности одного символа через DataProvider"""
         metrics = LiquidityMetrics(symbol=symbol)
 
         try:
-            # 1. Получаем 24h тикер (1 запрос)
+            # 1. Получаем 24h тикер через DataProvider
             logger.debug(f"📡 Получаем тикер для {symbol}")
-            ticker = await self.api.get_24h_ticker(symbol)
+            ticker = await self.data_provider.get_24h_ticker(symbol)
 
             if not ticker:
                 metrics.fail_reason = "Не удалось получить тикер"
                 logger.warning(f"❌ Нет тикера для {symbol}")
                 return metrics
 
-            # 2. Извлекаем данные (Bybit V5 специфика)
+            # 2. Извлекаем данные
             logger.debug(f"🔍 Парсинг данных для {symbol}")
             try:
                 volume_str = str(ticker.get('volume', '0')).replace(',', '')
@@ -222,7 +236,7 @@ class LiquidityPrefilter:
 
                 logger.debug(f"📊 {symbol}: объем={volume}, цена={last_price}")
 
-                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверка минимальной цены
+                # Проверка минимальной цены
                 if last_price < self.MIN_PRICE_THRESHOLD:
                     metrics.volume_24h_usd = volume * last_price
                     metrics.current_price = last_price
@@ -257,7 +271,7 @@ class LiquidityPrefilter:
             if self.CHECK_ORDERBOOK:
                 try:
                     logger.debug(f"📊 Проверка стакана для {symbol}")
-                    order_book = await self.api.get_order_book(symbol, limit=self.ORDERBOOK_LIMIT)
+                    order_book = await self.data_provider.get_order_book(symbol, limit=self.ORDERBOOK_LIMIT)
 
                     if order_book and 'bids' in order_book and 'asks' in order_book and order_book['bids'] and \
                             order_book['asks']:
@@ -349,6 +363,15 @@ class LiquidityPrefilter:
         if expired_symbols:
             logger.debug(f"🧹 Очищен кэш для {len(expired_symbols)} символов")
 
+    def clear_cache(self) -> None:
+        """
+        Очистить кэш проверенных символов (публичный метод)
+
+        ✅ ФАЗА 1.3.8: добавлен для использования в orchestrator.cleanup()
+        """
+        self._checked_symbols.clear()
+        logger.info("🧹 Кэш префильтра очищен")
+
     def get_metrics_for_symbol(self, symbol: str) -> Optional[LiquidityMetrics]:
         """Получение метрик для конкретного символа"""
         return self._checked_symbols.get(symbol)
@@ -373,8 +396,8 @@ class LiquidityPrefilter:
             if cached:
                 return cached.passed
 
-            # Быстрая проверка по тикеру
-            ticker = await self.api.get_24h_ticker(symbol)
+            # Быстрая проверка по тикеру через DataProvider
+            ticker = await self.data_provider.get_24h_ticker(symbol)
             if not ticker:
                 return False
 

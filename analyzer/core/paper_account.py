@@ -1,31 +1,25 @@
-# analyzer/core/paper_account.py (ПОЛНОСТЬЮ - УПРОЩЁННАЯ ВЕРСИЯ)
-"""
-📊 PAPER ACCOUNT - Виртуальный торговый счёт (упрощённая версия)
-ФАЗА 1.3.6:
-- Удалены PendingOrder (лимитные ордера)
-- Только MARKET ордера
-"""
+# analyzer/core/paper_account.py (ПОЛНОСТЬЮ - СИНГЛТОН)
 
 import logging
-import asyncio
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
-import random
+from datetime import datetime, timedelta
 
 logger = logging.getLogger('paper_account')
 
 
 @dataclass
 class PaperPosition:
-    """Виртуальная позиция (только MARKET)"""
     signal_id: int
     symbol: str
-    direction: str  # BUY/SELL
+    direction: str
     entry_price: float
     quantity: float
     stop_loss: float
     take_profit: float
+    leverage: float = 10.0
+    margin: float = 0.0
+    position_value: float = 0.0
     order_type: str = "MARKET"
     fill_price: float = 0.0
     expiration_time: Optional[datetime] = None
@@ -36,26 +30,53 @@ class PaperPosition:
     close_reason: str = ""
 
 
-class PaperAccount:
-    """
-    Виртуальный торговый счёт для Paper Trading
-    ФАЗА 1.3.6: Только MARKET ордера
-    """
+@dataclass
+class WatchReservation:
+    signal_id: int
+    symbol: str
+    reserved_margin: float
+    position_size: float
+    entry_price: float
+    leverage: float
+    created_at: datetime = field(default_factory=datetime.now)
+    expires_at: datetime = field(default_factory=lambda: datetime.now() + timedelta(hours=3))
 
-    def __init__(self, config: Dict[str, Any]):
+
+class PaperAccount:
+    """СИНГЛТОН - единый экземпляр для всего приложения"""
+
+    _instance = None
+    _initialized = False
+
+    def __new__(cls, config: Dict[str, Any] = None):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self, config: Dict[str, Any] = None):
+        if self._initialized:
+            return
+
+        if config is None:
+            config = {}
+
         self.config = config.get('paper_trading', {})
+        self.position_config = config.get('position_management', {})
+
         self.balance = self.config.get('starting_virtual_balance', 10000.0)
         self.commission_rate = self.config.get('commission_rate', 0.001)
         self.slippage_pct = self.config.get('slippage_percentage', 0.001)
+        self.default_leverage = self.config.get('leverage', 10)
 
         self.open_positions: Dict[int, PaperPosition] = {}
         self.closed_positions: List[Dict] = []
+        self.watch_reservations: Dict[int, WatchReservation] = {}
 
-        logger.info(f"✅ PaperAccount инициализирован. Баланс: {self.balance:.2f} USDT")
-        logger.info(f"   Комиссия: {self.commission_rate * 100:.2f}%, Проскальзывание: {self.slippage_pct * 100:.2f}%")
+        self._initialized = True
+
+        logger.info(f"✅ PaperAccount (СИНГЛТОН) баланс: {self.balance:.2f} USDT")
 
     def _round_price(self, price: float) -> float:
-        """Округление цены"""
         try:
             if price < 0.001:
                 return round(price, 6)
@@ -73,7 +94,6 @@ class PaperAccount:
             return round(price, 2)
 
     def _round_quantity(self, quantity: float) -> float:
-        """Округление количества"""
         try:
             if quantity < 0.001:
                 return round(quantity, 6)
@@ -83,10 +103,69 @@ class PaperAccount:
                 return round(quantity, 4)
             elif quantity < 1:
                 return round(quantity, 3)
-            else:
+            elif quantity < 1000:
                 return round(quantity, 2)
+            else:
+                return round(quantity, 0)
         except:
             return round(quantity, 2)
+
+    def calculate_margin(self, position_size: float, entry_price: float, leverage: float) -> float:
+        if leverage <= 0:
+            leverage = self.default_leverage
+        return (position_size * entry_price) / leverage
+
+    def calculate_total_risk_pct(self) -> float:
+        if self.balance <= 0:
+            return 0.0
+        total_risk = 0.0
+        for pos in self.open_positions.values():
+            risk_amount = abs(pos.entry_price - pos.stop_loss) * pos.quantity
+            total_risk += (risk_amount / self.balance) * 100
+        return total_risk
+
+    async def reserve_for_watch(
+            self,
+            signal_id: int,
+            symbol: str,
+            position_size: float,
+            entry_price: float,
+            leverage: float = None,
+            expiration_hours: int = 3
+    ) -> Tuple[bool, float]:
+        if leverage is None:
+            leverage = self.default_leverage
+
+        reserved_margin = self.calculate_margin(position_size, entry_price, leverage)
+
+        used_margin = sum(p.margin for p in self.open_positions.values())
+        total_reserved = sum(
+            r.reserved_margin for r in self.watch_reservations.values() if r.expires_at > datetime.now())
+        available = self.balance - used_margin - total_reserved
+
+        if reserved_margin > available:
+            logger.warning(
+                f"⚠️ Недостаточно средств для WATCH #{signal_id}: нужно {reserved_margin:.2f}, доступно {available:.2f}")
+            return False, 0.0
+
+        self.watch_reservations[signal_id] = WatchReservation(
+            signal_id=signal_id,
+            symbol=symbol,
+            reserved_margin=reserved_margin,
+            position_size=position_size,
+            entry_price=entry_price,
+            leverage=leverage,
+            expires_at=datetime.now() + timedelta(hours=expiration_hours)
+        )
+        logger.info(f"🔒 WATCH #{signal_id}: зарезервировано {reserved_margin:.2f} USDT")
+        return True, reserved_margin
+
+    async def release_watch_reserve(self, signal_id: int) -> bool:
+        if signal_id in self.watch_reservations:
+            res = self.watch_reservations.pop(signal_id)
+            logger.info(f"🔓 Освобождён WATCH #{signal_id}: {res.reserved_margin:.2f} USDT")
+            return True
+        return False
 
     async def open_position(
             self,
@@ -97,76 +176,59 @@ class PaperAccount:
             stop_loss: float,
             take_profit: float,
             quantity: float,
+            leverage: float = None,
             expiration_time: Optional[datetime] = None,
             order_type: str = "MARKET"
     ) -> PaperPosition:
-        """
-        Открыть позицию (только MARKET ордер)
-        """
-        try:
-            if quantity is None or quantity <= 0:
-                logger.error(f"❌ Некорректное quantity для сигнала #{signal_id}: {quantity}")
-                raise ValueError(f"Quantity must be positive for signal {signal_id}")
+        if quantity <= 0 or entry_price <= 0:
+            raise ValueError(f"Invalid params: quantity={quantity}, entry_price={entry_price}")
 
-            if entry_price <= 0:
-                logger.error(f"❌ entry_price <= 0 для сигнала #{signal_id}: {entry_price}")
-                raise ValueError(f"Entry price must be positive for signal {signal_id}")
+        if leverage is None:
+            leverage = self.default_leverage
 
-            entry_price = self._round_price(entry_price)
-            stop_loss = self._round_price(stop_loss)
-            take_profit = self._round_price(take_profit)
-            quantity = self._round_quantity(quantity)
+        entry_price = self._round_price(entry_price)
+        quantity = self._round_quantity(quantity)
 
-            # Симуляция проскальзывания при входе
-            slippage = entry_price * self.slippage_pct
-            if direction == 'BUY':
-                actual_entry = entry_price + slippage
-            else:
-                actual_entry = entry_price - slippage
+        slippage = entry_price * self.slippage_pct
+        if direction == 'BUY':
+            actual_entry = entry_price + slippage
+        else:
+            actual_entry = entry_price - slippage
+        actual_entry = self._round_price(actual_entry)
 
-            actual_entry = self._round_price(actual_entry)
+        position_value = quantity * actual_entry
+        margin = position_value / leverage
+        commission = actual_entry * quantity * self.commission_rate
+        total_required = margin + commission
 
-            # Расчёт комиссии
-            commission = actual_entry * quantity * self.commission_rate
+        if total_required > self.balance:
+            raise ValueError(f"Insufficient balance: need {total_required:.2f}, have {self.balance:.2f}")
 
-            # Проверка достаточности средств
-            required_margin = actual_entry * quantity + commission
-            if required_margin > self.balance:
-                logger.warning(f"⚠️ Недостаточно средств для открытия позиции #{signal_id}")
-                logger.warning(f"   Нужно: {required_margin:.2f}, Есть: {self.balance:.2f}")
-                raise ValueError(f"Insufficient balance: need {required_margin:.2f}, have {self.balance:.2f}")
+        old_balance = self.balance
+        self.balance -= total_required
 
-            # Создаём позицию
-            position = PaperPosition(
-                signal_id=signal_id,
-                symbol=symbol,
-                direction=direction,
-                entry_price=actual_entry,
-                quantity=quantity,
-                stop_loss=self._round_price(stop_loss),
-                take_profit=self._round_price(take_profit),
-                order_type="MARKET",
-                fill_price=actual_entry,
-                expiration_time=expiration_time
-            )
+        position = PaperPosition(
+            signal_id=signal_id,
+            symbol=symbol,
+            direction=direction,
+            entry_price=actual_entry,
+            quantity=quantity,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            leverage=leverage,
+            margin=margin,
+            position_value=position_value,
+            order_type="MARKET",
+            fill_price=actual_entry,
+            expiration_time=expiration_time
+        )
 
-            # Уменьшаем баланс
-            self.balance -= (actual_entry * quantity + commission)
+        self.open_positions[signal_id] = position
 
-            # Сохраняем позицию
-            self.open_positions[signal_id] = position
+        logger.info(f"⚡ MARKET #{signal_id}: {symbol} {direction} {quantity:.2f} @ {actual_entry:.6f}")
+        logger.info(f"   Маржа: {margin:.2f}, Баланс: {old_balance:.2f} → {self.balance:.2f}")
 
-            logger.info(f"⚡ MARKET ОРДЕР #{signal_id} ИСПОЛНЕН")
-            logger.info(f"   {symbol} {direction} @ {actual_entry:.6f} (запланировано: {entry_price:.6f})")
-            logger.info(f"   Quantity: {quantity:.4f}, Комиссия: {commission:.2f}")
-            logger.info(f"   SL: {stop_loss:.6f}, TP: {take_profit:.6f}")
-            logger.info(f"   Новый баланс: {self.balance:.2f}")
-
-            return position
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка открытия позиции #{signal_id}: {e}")
-            raise
+        return position
 
     async def close_position(
             self,
@@ -175,104 +237,97 @@ class PaperAccount:
             pnl: float,
             close_reason: str
     ) -> Optional[Dict[str, Any]]:
-        """Закрыть виртуальную позицию"""
-        try:
-            position = self.open_positions.pop(signal_id, None)
-            if not position:
-                logger.warning(f"⚠️ Позиция #{signal_id} не найдена для закрытия")
-                return None
-
-            # Симуляция проскальзывания при выходе
-            slippage = close_price * self.slippage_pct
-            if position.direction == 'BUY':
-                actual_close = close_price - slippage
-            else:
-                actual_close = close_price + slippage
-
-            actual_close = self._round_price(actual_close)
-
-            # Расчёт комиссии на закрытие
-            commission = actual_close * position.quantity * self.commission_rate
-
-            # Расчёт реального PnL с учётом проскальзывания
-            if position.direction == 'BUY':
-                actual_pnl = (actual_close - position.entry_price) * position.quantity
-            else:
-                actual_pnl = (position.entry_price - actual_close) * position.quantity
-
-            actual_pnl -= commission
-
-            # Обновляем баланс
-            self.balance += (actual_close * position.quantity + actual_pnl)
-
-            # Сохраняем информацию о закрытии
-            position.closed_at = datetime.now()
-            position.close_price = actual_close
-            position.pnl = actual_pnl
-            position.close_reason = close_reason
-
-            closed_info = {
-                'signal_id': signal_id,
-                'symbol': position.symbol,
-                'direction': position.direction,
-                'entry_price': position.entry_price,
-                'close_price': actual_close,
-                'quantity': position.quantity,
-                'pnl': actual_pnl,
-                'pnl_percent': (actual_pnl / (
-                            position.entry_price * position.quantity)) * 100 if position.entry_price * position.quantity > 0 else 0,
-                'close_reason': close_reason,
-                'opened_at': position.opened_at,
-                'closed_at': position.closed_at,
-                'commission': commission,
-                'order_type': position.order_type,
-                'fill_price': position.fill_price
-            }
-
-            self.closed_positions.append(closed_info)
-
-            logger.info(f"📉 ЗАКРЫТА ПОЗИЦИЯ #{signal_id}")
-            logger.info(f"   {position.symbol} {position.direction}")
-            logger.info(f"   Entry: {position.entry_price:.6f} → Close: {actual_close:.6f}")
-            logger.info(f"   PnL: {actual_pnl:+.2f} ({closed_info['pnl_percent']:+.2f}%)")
-            logger.info(f"   Причина: {close_reason}")
-            logger.info(f"   Новый баланс: {self.balance:.2f}")
-
-            return closed_info
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка закрытия позиции #{signal_id}: {e}")
+        position = self.open_positions.pop(signal_id, None)
+        if not position:
             return None
 
-    async def get_position(self, signal_id: int) -> Optional[PaperPosition]:
-        """Получить позицию по ID сигнала"""
-        return self.open_positions.get(signal_id)
+        slippage = close_price * self.slippage_pct
+        if position.direction == 'BUY':
+            actual_close = close_price - slippage
+        else:
+            actual_close = close_price + slippage
+        actual_close = self._round_price(actual_close)
 
-    async def get_open_positions(self) -> Dict[int, PaperPosition]:
-        """Получить все открытые позиции"""
-        return self.open_positions
+        commission = actual_close * position.quantity * self.commission_rate
+
+        if position.direction == 'BUY':
+            actual_pnl = (actual_close - position.entry_price) * position.quantity
+        else:
+            actual_pnl = (position.entry_price - actual_close) * position.quantity
+        actual_pnl -= commission
+
+        self.balance += position.margin + actual_pnl
+
+        position.closed_at = datetime.now()
+        position.close_price = actual_close
+        position.pnl = actual_pnl
+        position.close_reason = close_reason
+
+        closed_info = {
+            'signal_id': signal_id,
+            'symbol': position.symbol,
+            'direction': position.direction,
+            'entry_price': position.entry_price,
+            'close_price': actual_close,
+            'quantity': position.quantity,
+            'leverage': position.leverage,
+            'margin': position.margin,
+            'pnl': actual_pnl,
+            'pnl_percent': (actual_pnl / position.margin * 100) if position.margin > 0 else 0,
+            'close_reason': close_reason,
+            'opened_at': position.opened_at,
+            'closed_at': position.closed_at,
+            'commission': commission,
+            'order_type': position.order_type,
+            'fill_price': position.fill_price
+        }
+        self.closed_positions.append(closed_info)
+
+        logger.info(f"📉 ЗАКРЫТА #{signal_id}: {close_reason}, PnL: {actual_pnl:+.2f}")
+
+        return closed_info
 
     async def get_balance(self) -> float:
-        """Получить текущий баланс"""
         return self.balance
 
+    async def get_open_positions(self) -> Dict[int, PaperPosition]:
+        return self.open_positions
+
+    async def get_available_balance(self) -> float:
+        used_margin = sum(p.margin for p in self.open_positions.values())
+        total_reserved = sum(
+            r.reserved_margin for r in self.watch_reservations.values() if r.expires_at > datetime.now())
+        return self.balance - used_margin - total_reserved
+
     async def get_statistics(self) -> Dict[str, Any]:
-        """Получить статистику счёта"""
         total_trades = len(self.closed_positions)
         winning_trades = sum(1 for t in self.closed_positions if t['pnl'] > 0)
         losing_trades = sum(1 for t in self.closed_positions if t['pnl'] < 0)
-
         total_pnl = sum(t['pnl'] for t in self.closed_positions)
 
         return {
             'balance': self.balance,
+            'available_balance': await self.get_available_balance(),
+            'used_margin': sum(p.margin for p in self.open_positions.values()),
+            'reserved_for_watch': sum(
+                r.reserved_margin for r in self.watch_reservations.values() if r.expires_at > datetime.now()),
             'open_positions': len(self.open_positions),
             'total_trades': total_trades,
             'winning_trades': winning_trades,
             'losing_trades': losing_trades,
             'win_rate': (winning_trades / total_trades * 100) if total_trades > 0 else 0,
             'total_pnl': total_pnl,
-            'average_pnl': total_pnl / total_trades if total_trades > 0 else 0,
-            'max_win': max([t['pnl'] for t in self.closed_positions]) if self.closed_positions else 0,
-            'max_loss': min([t['pnl'] for t in self.closed_positions]) if self.closed_positions else 0
+            'total_risk_pct': self.calculate_total_risk_pct()
         }
+
+    async def cleanup_expired_reservations(self) -> int:
+        now = datetime.now()
+        expired = [sid for sid, res in self.watch_reservations.items() if res.expires_at < now]
+        for sid in expired:
+            await self.release_watch_reserve(sid)
+        if expired:
+            logger.info(f"🧹 Очищено {len(expired)} истёкших WATCH")
+        return len(expired)
+
+
+__all__ = ['PaperAccount', 'PaperPosition', 'WatchReservation']

@@ -1,5 +1,5 @@
 # tools/log_analyzer.py
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 
 import re
 import sys
@@ -77,7 +77,9 @@ class LogAnalyzer:
         if output_dir:
             self.output_dir = Path(output_dir)
         else:
-            self.output_dir = self.project_root / "logs" / "exports"
+            # Папка экспорта: logs/exports/YYYY-MM-DD/
+            date_folder = datetime.now().strftime("%Y-%m-%d")
+            self.output_dir = self.project_root / "logs" / "exports" / date_folder
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self._find_log_file(log_path)
@@ -400,8 +402,10 @@ class LogAnalyzer:
         print(f"   WARNING: {errors_by_level.get('WARNING', 0)}")
 
     def export_to_csv(self, filename: str, data_type: str = "all"):
+        """Экспорт данных в CSV с созданием папки по дате"""
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+        # Если filename содержит путь, используем его, иначе сохраняем в output_dir
         export_path = Path(filename)
         if not export_path.parent.exists() or str(export_path.parent) == '.':
             export_path = self.output_dir / export_path
@@ -618,7 +622,7 @@ class LogAnalyzer:
 def main():
     parser = argparse.ArgumentParser(description='Анализатор логов торгового бота')
     parser.add_argument('--log-path', '-l', help='Путь к лог-файлу')
-    parser.add_argument('--output-dir', '-o', help='Папка для сохранения результатов (по умолчанию: logs/exports)')
+    parser.add_argument('--output-dir', '-o', help='Папка для сохранения результатов (по умолчанию: logs/exports/YYYY-MM-DD/)')
     parser.add_argument('--export', '-e', help='Экспорт всех данных в CSV (указать имя файла)')
     parser.add_argument('--signals', '-s', action='store_true', help='Показать сигналы')
     parser.add_argument('--stats', '-st', action='store_true', help='Показать статистику')

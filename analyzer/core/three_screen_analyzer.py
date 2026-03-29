@@ -1,8 +1,7 @@
-# analyzer/core/three_screen_analyzer.py (ИСПРАВЛЕННЫЙ)
+# analyzer/core/three_screen_analyzer.py (ПОЛНОСТЬЮ - С DATAPROVIDER)
 
-import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Optional, Any
 
 from .screen1_trend_analyzer import Screen1TrendAnalyzer, Screen1Result
@@ -17,9 +16,17 @@ logger = logging.getLogger('three_screen_analyzer')
 
 class ThreeScreenAnalyzer:
 
-    def __init__(self, api_client, config):
-        self.api_client = api_client
+    def __init__(self, config, data_provider=None):
+        """
+        Args:
+            config: Конфигурация
+            data_provider: Экземпляр DataProvider (опционально, используется глобальный)
+        """
         self.config = config
+        self.data_provider = data_provider or globals().get('data_provider')
+        if self.data_provider is None:
+            from analyzer.core.data_provider import data_provider as global_dp
+            self.data_provider = global_dp
 
         analysis_config = config.get('analysis', {})
         caching_config = analysis_config.get('caching', {})
@@ -40,7 +47,7 @@ class ThreeScreenAnalyzer:
         self._initialized = False
         self._analysis_start_time = None
 
-        logger.info(f"✅ ThreeScreenAnalyzer создан (Фаза 1.3.6.1)")
+        logger.info(f"✅ ThreeScreenAnalyzer создан (Фаза 1.3.7) — использует DataProvider")
 
     def _get_cache_key(self, symbol: str, timeframe: str, calculation_type: str) -> str:
         return f"{symbol}_{timeframe}_{calculation_type}"
@@ -71,12 +78,6 @@ class ThreeScreenAnalyzer:
         logger.info("🚀 Начало инициализации ThreeScreenAnalyzer")
 
         try:
-            if hasattr(self.api_client, 'initialize') and not getattr(self.api_client, '_initialized', False):
-                init_success = await self.api_client.initialize()
-                if not init_success:
-                    logger.error("❌ Не удалось инициализировать API клиент")
-                    return False
-
             self._initialized = True
             logger.info("✅ ThreeScreenAnalyzer успешно инициализирован")
             return True
@@ -116,7 +117,7 @@ class ThreeScreenAnalyzer:
             return False
 
     async def _get_klines_for_analysis(self, symbol: str) -> Dict[str, List]:
-        logger.info(f"🔍 Получение данных для {symbol}")
+        logger.info(f"🔍 Получение данных для {symbol} через DataProvider")
 
         try:
             analysis_config = self.config.get('analysis', {})
@@ -137,7 +138,7 @@ class ThreeScreenAnalyzer:
 
             for tf, limit in timeframes.items():
                 try:
-                    klines = await self.api_client.get_klines(symbol, tf, limit)
+                    klines = await self.data_provider.get_klines(symbol, tf, limit)
 
                     if not self._validate_klines_data(klines, tf):
                         continue
@@ -193,7 +194,7 @@ class ThreeScreenAnalyzer:
                 signal_subtype = getattr(screen3_result, 'signal_subtype', 'M15')
 
                 if signal_subtype == 'M15':
-                    current_price = await self.api_client.get_current_price(symbol, force_refresh=True)
+                    current_price = await self.data_provider.get_current_price(symbol, force_refresh=True)
                     if current_price:
                         deviation_pct = abs(
                             current_price - screen3_result.entry_price) / screen3_result.entry_price * 100
@@ -226,7 +227,7 @@ class ThreeScreenAnalyzer:
         h4_klines = klines_data.get('4h', [])
         h1_klines = klines_data.get('1h', [])
 
-        # ✅ ПРЕОБРАЗОВАНИЕ: список списков → список словарей
+        # Преобразование: список списков → список словарей
         def convert_klines(klines_list):
             if not klines_list:
                 return []
@@ -272,7 +273,7 @@ class ThreeScreenAnalyzer:
         m15_klines = klines_data.get('15m', [])
         m5_klines = klines_data.get('5m', [])
 
-        # ✅ ПРЕОБРАЗОВАНИЕ для screen3
+        # Преобразование для screen3
         def convert_klines(klines_list):
             if not klines_list:
                 return []

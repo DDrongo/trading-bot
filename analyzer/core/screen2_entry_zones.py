@@ -3,8 +3,8 @@ screen2_entry_zones.py - поиск зон входа (H4)
 """
 import logging
 import numpy as np
-from typing import List, Tuple, Optional, Dict, Any
-from datetime import datetime
+from typing import List, Dict, Any
+
 
 logger = logging.getLogger(__name__)
 

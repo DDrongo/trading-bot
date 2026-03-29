@@ -6,7 +6,6 @@
 import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
-import numpy as np
 from functools import lru_cache
 
 logger = logging.getLogger('screen1_analyzer')

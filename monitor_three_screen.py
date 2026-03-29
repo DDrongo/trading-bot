@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-# monitor_three_screen.py (ПОЛНАЯ ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# monitor_three_screen.py (ПОЛНАЯ ВЕРСИЯ - ФАЗА 1.3.8)
 """
-🎯 МОНИТОР ДЛЯ THREE SCREEN ANALYZER - ВЕРСИЯ 1.3.6
+🎯 МОНИТОР ДЛЯ THREE SCREEN ANALYZER - ВЕРСИЯ 1.3.8
 Особенности:
 - Отображение WATCH и M15 сигналов
 - Показ зон входа (zone_low/zone_high)
 - Показ score Screen2
-- ✅ ЭКСПОРТ ДАННЫХ в CSV/JSON/TXT/ZIP
-- ✅ Единая папка экспорта: logs/exports/
+- ЭКСПОРТ ДАННЫХ в CSV/JSON/TXT/ZIP
+- Папка экспорта: logs/exports/YYYY-MM-DD/
+- DataProvider для получения текущей цены
+- РАЗДЕЛЕНИЕ планируемых и фактических данных
+- ВРЕМЕННАЯ ШКАЛА (создан, истекает, открыт, закрыт)
+- СОСТОЯНИЕ СЧЁТА (депозит, маржа, резерв, доступно, PnL)
+- ИСПРАВЛЕНО: единое время через time_utils
+- ИСПРАВЛЕНО: отображение состояния счёта с учётом позиций
 """
 
 import asyncio
 import logging
 import os
 import re
+import sys
 import yaml
 import csv
 import json
@@ -21,53 +28,81 @@ import zipfile
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 from datetime import datetime, timedelta
-from colorama import init, Fore, Style
 
-init()
+sys.path.insert(0, str(Path(__file__).parent))
+
+try:
+    from colorama import init, Fore, Style
+    init()
+except ImportError:
+    class Fore:
+        RED = ''; GREEN = ''; YELLOW = ''; CYAN = ''; MAGENTA = ''; WHITE = ''; RESET = ''
+    class Style:
+        BRIGHT = ''; RESET_ALL = ''
+    def init(): pass
+
+from analyzer.core.time_utils import now, utc_now, to_local, format_local, parse_iso_to_local, TIMEZONE_OFFSET
+
 logger = logging.getLogger('three_screen_monitor')
 
 
 class ThreeScreenMonitor:
-    def __init__(self, config=None):
+
+    def __init__(self, config: Optional[Dict] = None):
         if config is None:
             config_path = Path(__file__).parent / 'analyzer/config/config.yaml'
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = yaml.safe_load(f)
-            except Exception as e:
-                print(f"❌ Ошибка загрузки конфига: {e}")
+            except Exception:
                 config = {}
 
         self.config = config
 
+        self.signal_repo = None
+        self.trade_repo = None
+        self.paper_account = None
+
         try:
             from analyzer.core.signal_repository import signal_repository
             self.signal_repo = signal_repository
-        except ImportError as e:
-            print(f"❌ Ошибка импорта signal_repository: {e}")
-            self.signal_repo = None
+        except ImportError:
+            pass
 
         try:
             from analyzer.core.trade_repository import trade_repository
             self.trade_repo = trade_repository
-        except ImportError as e:
-            print(f"❌ Ошибка импорта trade_repository: {e}")
-            self.trade_repo = None
+        except ImportError:
+            pass
+
+        try:
+            from analyzer.core.paper_account import PaperAccount
+            self.paper_account = PaperAccount(config) if config else None
+        except ImportError:
+            pass
+
+        self.data_provider = None
+        try:
+            from analyzer.core.data_provider import data_provider
+            self.data_provider = data_provider
+            self.data_provider.configure(self.config)
+        except Exception:
+            pass
 
         display_config = self.config.get('display', {})
-        self.timezone_offset = display_config.get('timezone_offset', 3)
+        self.timezone_offset = display_config.get('timezone_offset', TIMEZONE_OFFSET)
         self.refresh_interval = display_config.get('refresh_interval', 5)
+
+        paper_config = self.config.get('paper_trading', {})
+        self.starting_balance = paper_config.get('starting_virtual_balance', 10000.0)
 
         db_config = self.config.get('database', {})
         db_signals_config = self.config.get('database_signals', {})
-
         db_path = None
         if isinstance(db_signals_config, dict) and db_signals_config.get('enabled', False):
             db_path = db_signals_config.get('path')
-
         if not db_path and isinstance(db_config, dict):
             db_path = db_config.get('path')
-
         if not db_path:
             db_path = 'data/trading_bot.db'
 
@@ -88,30 +123,37 @@ class ThreeScreenMonitor:
         print(f"📊 Монитор использует БД: {self.db_path}")
         print(f"🕐 Часовой пояс: UTC+{self.timezone_offset}")
 
-    def strip_ansi(self, text: str) -> str:
+    @staticmethod
+    def strip_ansi(text: str) -> str:
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         return ansi_escape.sub('', str(text))
 
     def get_visible_length(self, text: str) -> int:
         return len(self.strip_ansi(str(text)))
 
-    def clear_screen(self):
+    @staticmethod
+    def clear_screen() -> None:
         os.system('cls' if os.name == 'nt' else 'clear')
 
-    def print_header(self, title: str):
+    @staticmethod
+    def print_header(title: str) -> None:
         print(f"\n{Fore.CYAN}{Style.BRIGHT}{'=' * 80}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}{Style.BRIGHT}{title}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}{Style.BRIGHT}{'=' * 80}{Style.RESET_ALL}")
 
     def utc_to_local(self, utc_str: str) -> datetime:
         if not utc_str:
-            return datetime.now()
+            return now()
         try:
-            utc_time = datetime.fromisoformat(utc_str.replace('Z', '+00:00'))
-            local_time = utc_time + timedelta(hours=self.timezone_offset)
-            return local_time
+            # Если строка уже содержит часовой пояс
+            if '+' in utc_str or 'Z' in utc_str:
+                dt = datetime.fromisoformat(utc_str.replace('Z', '+00:00'))
+            else:
+                # Если нет пояса — считаем что это UTC
+                dt = datetime.fromisoformat(utc_str)
+            return dt + timedelta(hours=self.timezone_offset)
         except Exception:
-            return datetime.now()
+            return now()
 
     def format_time(self, timestamp_str: str) -> str:
         if not timestamp_str:
@@ -140,7 +182,8 @@ class ThreeScreenMonitor:
         except:
             return timestamp_str
 
-    def format_direction(self, direction: str) -> str:
+    @staticmethod
+    def format_direction(direction: str) -> str:
         direction_lower = direction.lower() if direction else ''
         if direction_lower in ['buy', 'long']:
             return f"{Fore.GREEN}▲ BUY{Style.RESET_ALL}"
@@ -148,9 +191,9 @@ class ThreeScreenMonitor:
             return f"{Fore.RED}▼ SELL{Style.RESET_ALL}"
         return direction or 'N/A'
 
-    def format_status(self, status: str) -> str:
+    @staticmethod
+    def format_status(status: str) -> str:
         status_lower = status.lower() if status else ''
-
         if status_lower == 'watch':
             return f"{Fore.YELLOW}WATCH{Style.RESET_ALL}"
         elif status_lower == 'active':
@@ -166,42 +209,43 @@ class ThreeScreenMonitor:
         else:
             return status or 'N/A'
 
-    def format_confidence(self, confidence: float) -> str:
+    @staticmethod
+    def format_confidence(confidence: float) -> str:
         if confidence is None:
             return "-"
-
         if confidence > 0.8:
             color = Fore.GREEN
         elif confidence > 0.6:
             color = Fore.YELLOW
         else:
             color = Fore.RED
-
         return f"{color}{confidence * 100:.1f}%{Style.RESET_ALL}"
 
-    def format_price(self, price: float) -> str:
+    @staticmethod
+    def format_price(price: float) -> str:
         if price is None or price == 0:
             return "-"
-        if price >= 1:
+        if price < 0.001:
+            return f"{price:.8f}"
+        elif price < 0.01:
+            return f"{price:.6f}"
+        elif price < 0.1:
+            return f"{price:.5f}"
+        elif price < 1:
+            return f"{price:.4f}"
+        elif price < 10:
+            return f"{price:.3f}"
+        elif price < 100:
             return f"{price:.2f}"
-        return f"{price:.6f}"
-
-    def format_rr_ratio(self, rr: float) -> str:
-        if rr is None or rr == 0:
-            return "-"
-
-        if rr >= 3.0:
-            color = Fore.GREEN
-        elif rr >= 2.0:
-            color = Fore.YELLOW
         else:
-            color = Fore.RED
+            return f"{price:.2f}"
 
-        return f"{color}{rr:.2f}:1{Style.RESET_ALL}"
-
-    def format_pnl(self, pnl: float) -> str:
+    @staticmethod
+    def format_pnl(pnl: float) -> str:
         if pnl is None:
             return "-"
+        if abs(pnl) < 0.01 and pnl != 0:
+            return f"{Fore.YELLOW}{pnl:.6f}{Style.RESET_ALL}"
         if pnl > 0:
             return f"{Fore.GREEN}+{pnl:.2f}{Style.RESET_ALL}"
         elif pnl < 0:
@@ -209,28 +253,26 @@ class ThreeScreenMonitor:
         else:
             return f"{Fore.YELLOW}0.00{Style.RESET_ALL}"
 
-    def format_trend(self, trend: str) -> str:
-        if not trend:
+    @staticmethod
+    def format_rr_ratio(rr: float) -> str:
+        if rr is None or rr == 0:
             return "-"
-        trend_upper = trend.upper()
-        if trend_upper == 'BULL':
-            return f"{Fore.GREEN}BULL{Style.RESET_ALL}"
-        elif trend_upper == 'BEAR':
-            return f"{Fore.RED}BEAR{Style.RESET_ALL}"
-        return trend
+        if rr >= 3.0:
+            color = Fore.GREEN
+        elif rr >= 2.0:
+            color = Fore.YELLOW
+        else:
+            color = Fore.RED
+        return f"{color}{rr:.2f}:1{Style.RESET_ALL}"
 
-    def format_screen(self, screen: str) -> str:
+    @staticmethod
+    def format_screen(screen: str) -> str:
         if not screen:
             return "-"
-
         if screen.upper() == 'WATCH':
             return f"{Fore.YELLOW}WATCH{Style.RESET_ALL}"
         elif screen.upper() == 'M15':
             return f"{Fore.GREEN}M15{Style.RESET_ALL}"
-        elif screen.upper() == 'D1':
-            return f"{Fore.CYAN}D1{Style.RESET_ALL}"
-        elif screen.upper() == 'H4':
-            return f"{Fore.YELLOW}H4{Style.RESET_ALL}"
         return screen
 
     def format_zone(self, zone_low: float, zone_high: float) -> str:
@@ -238,7 +280,8 @@ class ThreeScreenMonitor:
             return "-"
         return f"{self.format_price(zone_low)}-{self.format_price(zone_high)}"
 
-    def format_score(self, score: int) -> str:
+    @staticmethod
+    def format_score(score: int) -> str:
         if score is None or score == 0:
             return "-"
         if score >= 4:
@@ -248,18 +291,25 @@ class ThreeScreenMonitor:
         else:
             return f"{Fore.RED}{score}/5{Style.RESET_ALL}"
 
-    def format_position_size(self, size: float) -> str:
+    @staticmethod
+    def format_position_size(size: float) -> str:
         if size is None or size == 0:
             return "-"
         return f"{size:.4f}"
+
+    @staticmethod
+    def format_leverage(leverage: float) -> str:
+        if leverage is None or leverage == 0:
+            return "10x"
+        return f"{leverage:.1f}x"
 
     def create_table(self, headers: List[str], data: List[List[str]]) -> str:
         if not data:
             return "Нет данных"
 
         col_widths = []
-        for i in range(len(headers)):
-            max_width = len(headers[i])
+        for i, header in enumerate(headers):
+            max_width = len(header)
             for row in data:
                 if i < len(row):
                     visible_text = self.strip_ansi(str(row[i]))
@@ -267,7 +317,6 @@ class ThreeScreenMonitor:
             col_widths.append(max_width + 2)
 
         result = []
-
         top_border = "┌" + "┬".join("─" * width for width in col_widths) + "┐"
         result.append(top_border)
 
@@ -295,29 +344,17 @@ class ThreeScreenMonitor:
 
         bottom_border = "└" + "┴".join("─" * width for width in col_widths) + "┘"
         result.append(bottom_border)
-
         return "\n".join(result)
 
-    async def get_current_price(self, symbol: str) -> Optional[float]:
-        try:
-            from analyzer.core.api_client_bybit import BybitAPIClient
-            api_config = self.config.get('api', {})
-            client = BybitAPIClient(api_config)
-            return await client.get_current_price(symbol)
-        except Exception as e:
-            return None
-
-    # ========== МЕТОДЫ ЭКСПОРТА ==========
-
     def _get_export_dir(self) -> Path:
-        """Создаёт и возвращает папку для экспорта (единая папка logs/exports)"""
         project_root = Path(__file__).parent
-        export_dir = project_root / 'logs' / 'exports'
+        date_folder = now().strftime("%Y-%m-%d")
+        export_dir = project_root / 'logs' / 'exports' / date_folder
         export_dir.mkdir(parents=True, exist_ok=True)
         return export_dir
 
-    def _get_file_size(self, file_path: str) -> str:
-        """Возвращает человеко-читаемый размер файла"""
+    @staticmethod
+    def _get_file_size(file_path: str) -> str:
         try:
             size = os.path.getsize(file_path)
             if size < 1024:
@@ -330,46 +367,33 @@ class ThreeScreenMonitor:
             return "?"
 
     def _open_export_folder(self, file_path: str) -> None:
-        """Открывает папку с файлом в проводнике/файндере"""
         folder = os.path.dirname(file_path)
         try:
-            if os.name == 'nt':  # Windows
+            if os.name == 'nt':
                 os.startfile(folder)
-            elif os.name == 'posix':  # macOS/Linux
+            elif os.name == 'posix':
                 if os.system(f'open "{folder}"') != 0:
                     os.system(f'xdg-open "{folder}"')
             print(f"{Fore.GREEN}📂 Папка открыта: {folder}{Style.RESET_ALL}")
         except Exception as e:
             print(f"{Fore.YELLOW}⚠️ Не удалось открыть папку: {e}{Style.RESET_ALL}")
-            print(f"📁 Путь: {folder}")
 
-    async def export_signals(self, format: str = 'csv') -> Optional[str]:
-        """
-        Экспорт таблицы сигналов в файл.
-        Форматы: csv, json
-        """
+    async def export_signals(self, fmt: str = 'csv') -> Optional[str]:
         try:
             if not self.signal_repo:
                 print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
                 return None
 
             signals = await self.signal_repo.get_signals(limit=1000)
-
             if not signals:
                 print(f"{Fore.YELLOW}⚠️ Нет данных для экспорта{Style.RESET_ALL}")
                 return None
 
             export_dir = self._get_export_dir()
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = now().strftime("%Y%m%d_%H%M%S")
+            fields = ['id', 'symbol', 'direction', 'signal_subtype', 'status', 'entry_price', 'stop_loss', 'take_profit', 'risk_reward_ratio', 'zone_low', 'zone_high', 'screen2_score', 'expected_pattern', 'trigger_pattern', 'confidence', 'created_time', 'expiration_time', 'updated_time', 'fill_price', 'position_size', 'leverage']
 
-            fields = [
-                'id', 'symbol', 'direction', 'signal_subtype', 'status',
-                'entry_price', 'stop_loss', 'take_profit', 'risk_reward_ratio',
-                'zone_low', 'zone_high', 'screen2_score', 'expected_pattern',
-                'trigger_pattern', 'confidence', 'created_time', 'expiration_time'
-            ]
-
-            if format == 'csv':
+            if fmt == 'csv':
                 filename = export_dir / f"signals_{timestamp}.csv"
                 with open(filename, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.DictWriter(f, fieldnames=fields)
@@ -377,56 +401,36 @@ class ThreeScreenMonitor:
                     for signal in signals:
                         row = {field: signal.get(field, '') for field in fields}
                         writer.writerow(row)
-
                 print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-                print(f"📊 Размер: {self._get_file_size(str(filename))}")
-                print(f"📈 Всего записей: {len(signals)}")
-
                 return str(filename)
-
-            elif format == 'json':
+            elif fmt == 'json':
                 filename = export_dir / f"signals_{timestamp}.json"
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(signals, f, ensure_ascii=False, indent=2, default=str)
-
                 print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-                print(f"📊 Размер: {self._get_file_size(str(filename))}")
-                print(f"📈 Всего записей: {len(signals)}")
-
                 return str(filename)
-
-            else:
-                print(f"{Fore.RED}❌ Неподдерживаемый формат: {format}{Style.RESET_ALL}")
-                return None
-
+            return None
         except Exception as e:
-            logger.error(f"❌ Ошибка экспорта сигналов: {e}")
+            logger.error(f"❌ Ошибка экспорта: {e}")
             print(f"{Fore.RED}❌ Ошибка экспорта: {e}{Style.RESET_ALL}")
             return None
 
-    async def export_trades(self, format: str = 'csv') -> Optional[str]:
-        """Экспорт таблицы сделок в файл"""
+    async def export_trades(self, fmt: str = 'csv') -> Optional[str]:
         try:
             if not self.trade_repo:
                 print(f"{Fore.RED}❌ TradeRepository не инициализирован{Style.RESET_ALL}")
                 return None
 
             trades = await self.trade_repo.get_closed_trades(limit=1000)
-
             if not trades:
                 print(f"{Fore.YELLOW}⚠️ Нет данных для экспорта{Style.RESET_ALL}")
                 return None
 
             export_dir = self._get_export_dir()
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = now().strftime("%Y%m%d_%H%M%S")
+            fields = ['id', 'signal_id', 'symbol', 'direction', 'entry_price', 'close_price', 'quantity', 'leverage', 'margin', 'position_value', 'pnl', 'pnl_percent', 'commission', 'close_reason', 'opened_at', 'closed_at', 'status']
 
-            fields = [
-                'id', 'signal_id', 'symbol', 'direction', 'entry_price',
-                'close_price', 'quantity', 'pnl', 'pnl_percent', 'commission',
-                'close_reason', 'opened_at', 'closed_at', 'status'
-            ]
-
-            if format == 'csv':
+            if fmt == 'csv':
                 filename = export_dir / f"trades_{timestamp}.csv"
                 with open(filename, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.DictWriter(f, fieldnames=fields)
@@ -434,46 +438,30 @@ class ThreeScreenMonitor:
                     for trade in trades:
                         row = {field: trade.get(field, '') for field in fields}
                         writer.writerow(row)
-
                 print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-                print(f"📊 Размер: {self._get_file_size(str(filename))}")
-                print(f"📈 Всего записей: {len(trades)}")
-
                 return str(filename)
-
-            elif format == 'json':
+            elif fmt == 'json':
                 filename = export_dir / f"trades_{timestamp}.json"
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(trades, f, ensure_ascii=False, indent=2, default=str)
-
                 print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-                print(f"📊 Размер: {self._get_file_size(str(filename))}")
-                print(f"📈 Всего записей: {len(trades)}")
-
                 return str(filename)
-
-            else:
-                print(f"{Fore.RED}❌ Неподдерживаемый формат: {format}{Style.RESET_ALL}")
-                return None
-
+            return None
         except Exception as e:
-            logger.error(f"❌ Ошибка экспорта сделок: {e}")
-            print(f"{Fore.RED}❌ Ошибка экспорта: {e}{Style.RESET_ALL}")
+            logger.error(f"❌ Ошибка экспорта: {e}")
             return None
 
     async def export_stats(self) -> str:
-        """Экспорт статистики в текстовый файл"""
         try:
             stats = await self.signal_repo.get_database_stats() if self.signal_repo else {}
-
             export_dir = self._get_export_dir()
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = now().strftime("%Y%m%d_%H%M%S")
             filename = export_dir / f"stats_{timestamp}.txt"
 
             content = f"""
 ========================================
 СТАТИСТИКА ТОРГОВОГО БОТА
-Дата: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Дата: {format_local(now())}
 ========================================
 
 СИГНАЛЫ:
@@ -491,42 +479,28 @@ class ThreeScreenMonitor:
   Убыточных:           {stats.get('losing_trades', 0)}
   Общий PnL:           {stats.get('total_pnl', 0):.2f}
   Win Rate:            {stats.get('win_rate', 0):.1f}%
-
-ДЕТАЛИ ПО СТАТУСАМ:
 """
-            for status, count in stats.get('status_stats', {}).items():
-                content += f"  {status}: {count}\n"
-
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(content)
-
             print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-            print(f"📊 Размер: {self._get_file_size(str(filename))}")
-
             return str(filename)
-
         except Exception as e:
-            logger.error(f"❌ Ошибка экспорта статистики: {e}")
-            print(f"{Fore.RED}❌ Ошибка экспорта: {e}{Style.RESET_ALL}")
+            logger.error(f"❌ Ошибка экспорта: {e}")
             return ""
 
     async def export_all(self) -> str:
-        """Экспорт всех данных в ZIP архив"""
         try:
             export_dir = self._get_export_dir()
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = now().strftime("%Y%m%d_%H%M%S")
             zip_path = export_dir / f"full_export_{timestamp}.zip"
 
             temp_files = []
-
             signals_file = await self.export_signals('csv')
             if signals_file:
                 temp_files.append(signals_file)
-
             trades_file = await self.export_trades('csv')
             if trades_file:
                 temp_files.append(trades_file)
-
             stats_file = await self.export_stats()
             if stats_file:
                 temp_files.append(stats_file)
@@ -540,22 +514,16 @@ class ThreeScreenMonitor:
                     zipf.write(file_path, os.path.basename(file_path))
 
             print(f"{Fore.GREEN}✅ ZIP архив создан: {zip_path}{Style.RESET_ALL}")
-            print(f"📊 Размер: {self._get_file_size(str(zip_path))}")
-            print(f"📁 В архиве: {len(temp_files)} файлов")
-
             return str(zip_path)
-
         except Exception as e:
-            logger.error(f"❌ Ошибка создания ZIP архива: {e}")
-            print(f"{Fore.RED}❌ Ошибка: {e}{Style.RESET_ALL}")
+            logger.error(f"❌ Ошибка: {e}")
             return ""
 
     async def export_menu(self):
-        """Подменю экспорта данных"""
         while True:
             self.clear_screen()
             self.print_header("📁 ЭКСПОРТ ДАННЫХ")
-
+            export_dir = self._get_export_dir()
             print(f"{Fore.YELLOW}Выберите формат экспорта:{Style.RESET_ALL}")
             print("1. 📊 Экспорт сигналов (CSV)")
             print("2. 📊 Экспорт сигналов (JSON)")
@@ -564,77 +532,81 @@ class ThreeScreenMonitor:
             print("5. 📋 Экспорт статистики (TXT)")
             print("6. 📦 Экспорт всех данных (ZIP)")
             print("0. 🔙 Назад")
-            print()
-            print(f"{Fore.CYAN}📂 Папка экспорта: {self._get_export_dir()}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}📂 Папка экспорта: {export_dir}{Style.RESET_ALL}")
 
             try:
                 choice = input(f"\n{Fore.CYAN}🎯 Выбор (0-6): {Style.RESET_ALL}").strip()
-
                 if choice == '1':
                     await self.export_signals('csv')
-                    print(f"\n{Fore.GREEN}📂 Открыть папку с файлом? (y/n): {Style.RESET_ALL}", end='')
-                    if input().lower() == 'y':
-                        self._open_export_folder(str(self._get_export_dir()))
                     await asyncio.sleep(2)
-
                 elif choice == '2':
                     await self.export_signals('json')
-                    print(f"\n{Fore.GREEN}📂 Открыть папку с файлом? (y/n): {Style.RESET_ALL}", end='')
-                    if input().lower() == 'y':
-                        self._open_export_folder(str(self._get_export_dir()))
                     await asyncio.sleep(2)
-
                 elif choice == '3':
                     await self.export_trades('csv')
-                    print(f"\n{Fore.GREEN}📂 Открыть папку с файлом? (y/n): {Style.RESET_ALL}", end='')
-                    if input().lower() == 'y':
-                        self._open_export_folder(str(self._get_export_dir()))
                     await asyncio.sleep(2)
-
                 elif choice == '4':
                     await self.export_trades('json')
-                    print(f"\n{Fore.GREEN}📂 Открыть папку с файлом? (y/n): {Style.RESET_ALL}", end='')
-                    if input().lower() == 'y':
-                        self._open_export_folder(str(self._get_export_dir()))
                     await asyncio.sleep(2)
-
                 elif choice == '5':
                     await self.export_stats()
-                    print(f"\n{Fore.GREEN}📂 Открыть папку с файлом? (y/n): {Style.RESET_ALL}", end='')
-                    if input().lower() == 'y':
-                        self._open_export_folder(str(self._get_export_dir()))
                     await asyncio.sleep(2)
-
                 elif choice == '6':
-                    zip_file = await self.export_all()
-                    if zip_file:
-                        print(f"\n{Fore.GREEN}📂 Открыть папку с файлом? (y/n): {Style.RESET_ALL}", end='')
-                        if input().lower() == 'y':
-                            self._open_export_folder(str(self._get_export_dir()))
+                    await self.export_all()
                     await asyncio.sleep(2)
-
                 elif choice == '0':
                     break
-                else:
-                    print(f"{Fore.RED}❌ Неверный выбор!{Style.RESET_ALL}")
-                    await asyncio.sleep(1)
-
             except KeyboardInterrupt:
                 break
-            except Exception as e:
-                logger.error(f"❌ Ошибка в меню экспорта: {e}")
-                await asyncio.sleep(1)
 
-    # ========== МЕТОДЫ МОНИТОРА ==========
+    async def get_current_price(self, symbol: str) -> Optional[float]:
+        if not self.data_provider:
+            return None
+        try:
+            return await self.data_provider.get_current_price(symbol)
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения цены {symbol}: {e}")
+            return None
+
+    async def get_account_state(self) -> Dict[str, Any]:
+        state = {
+            'initial_balance': self.starting_balance,
+            'current_balance': self.starting_balance,
+            'used_margin': 0.0,
+            'reserved_for_watch': 0.0,
+            'available': self.starting_balance,
+            'total_pnl': 0.0
+        }
+
+        try:
+            if self.paper_account:
+                state['current_balance'] = await self.paper_account.get_balance()
+                positions = await self.paper_account.get_open_positions()
+                for pos in positions.values():
+                    state['used_margin'] += pos.margin
+                stats = await self.paper_account.get_statistics()
+                state['total_pnl'] = stats.get('total_pnl', 0)
+
+            if self.signal_repo:
+                watch_signals = await self.signal_repo.get_watch_signals_with_reserve()
+                for watch in watch_signals:
+                    reserved = watch.get('reserved_margin')
+                    if reserved is not None:
+                        state['reserved_for_watch'] += float(reserved)
+
+            state['available'] = state['current_balance'] - state['used_margin'] - state['reserved_for_watch']
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения состояния счёта: {e}")
+
+        return state
 
     async def display_realtime_monitor(self):
-        """Реалтайм мониторинг сигналов"""
         self._shutdown = False
-
         try:
             while not self._shutdown:
                 self.clear_screen()
-                self.print_header("THREE SCREEN ANALYZER - РЕАЛТАЙМ МОНИТОР (v1.3.6)")
+                self.print_header("THREE SCREEN ANALYZER - РЕАЛТАЙМ МОНИТОР (v1.3.8)")
 
                 if not self.signal_repo:
                     print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
@@ -642,6 +614,17 @@ class ThreeScreenMonitor:
 
                 signals = await self.signal_repo.get_signals_with_trades(self.settings['signals_limit'])
                 stats = await self.signal_repo.get_database_stats()
+                account_state = await self.get_account_state()
+
+                print(f"{Fore.YELLOW}💰 СОСТОЯНИЕ СЧЁТА:{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
+                print(f"  Депозит (начальный):    {Fore.WHITE}{account_state['initial_balance']:.2f} USDT{Style.RESET_ALL}")
+                print(f"  Текущий баланс:         {Fore.WHITE}{account_state['current_balance']:.2f} USDT{Style.RESET_ALL}")
+                print(f"  Использовано маржи:     {Fore.YELLOW}{account_state['used_margin']:.2f} USDT{Style.RESET_ALL}")
+                print(f"  Зарезервировано (WATCH):{Fore.YELLOW}{account_state['reserved_for_watch']:.2f} USDT{Style.RESET_ALL}")
+                print(f"  Доступно средств:       {Fore.GREEN if account_state['available'] > 0 else Fore.RED}{account_state['available']:.2f} USDT{Style.RESET_ALL}")
+                print(f"  Общий PnL:              {self.format_pnl(account_state['total_pnl'])}")
+                print()
 
                 print(f"{Fore.YELLOW}📊 СТАТИСТИКА СИСТЕМЫ:{Style.RESET_ALL}")
                 print(f"   Всего сигналов: {stats.get('total_signals', 0)}")
@@ -661,29 +644,17 @@ class ThreeScreenMonitor:
                     for signal in signals:
                         time_str = self.format_time(signal.get('created_time', ''))
                         date_str = self.format_date(signal.get('created_time', ''))
-
                         signal_subtype = signal.get('signal_subtype', '')
-                        status = signal.get('status', '')
-
                         pnl_str = self.format_pnl(signal.get('trade_pnl', 0)) if signal.get('trade_pnl') is not None else "-"
-
                         zone_str = self.format_zone(signal.get('zone_low', 0), signal.get('zone_high', 0))
                         score_str = self.format_score(signal.get('screen2_score', 0))
 
                         table_data.append([
-                            str(signal.get('id', '')),
-                            signal.get('symbol', ''),
-                            self.format_screen(signal_subtype),
-                            self.format_direction(signal.get('direction', '')),
-                            self.format_status(status),
-                            self.format_price(signal.get('entry_price', 0)),
-                            zone_str,
-                            score_str,
-                            self.format_price(signal.get('stop_loss', 0)),
-                            self.format_price(signal.get('take_profit', 0)),
-                            self.format_rr_ratio(signal.get('risk_reward_ratio', 0)),
-                            pnl_str,
-                            f"{date_str} {time_str}"
+                            str(signal.get('id', '')), signal.get('symbol', ''), self.format_screen(signal_subtype),
+                            self.format_direction(signal.get('direction', '')), self.format_status(signal.get('status', '')),
+                            self.format_price(signal.get('entry_price', 0)), zone_str, score_str,
+                            self.format_price(signal.get('stop_loss', 0)), self.format_price(signal.get('take_profit', 0)),
+                            self.format_rr_ratio(signal.get('risk_reward_ratio', 0)), pnl_str, f"{date_str} {time_str}"
                         ])
 
                     headers = ["ID", "Монета", "Тип", "Напр", "Статус", "Entry", "Зона", "Score", "SL", "TP", "R/R", "PnL", "Время"]
@@ -694,57 +665,45 @@ class ThreeScreenMonitor:
                 print(f"{Fore.YELLOW}Нажмите Enter для возврата в меню{Style.RESET_ALL}")
 
                 try:
-                    await asyncio.wait_for(self.wait_for_enter(), timeout=self.settings['refresh_interval'])
+                    await asyncio.wait_for(self._wait_for_enter(), timeout=self.settings['refresh_interval'])
                     break
                 except asyncio.TimeoutError:
                     continue
 
         except KeyboardInterrupt:
             print(f"\n{Fore.YELLOW}🛑 Монитор остановлен{Style.RESET_ALL}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка в реалтайм мониторе: {e}")
         finally:
             self._shutdown = False
 
     async def display_trades_table(self):
-        """Таблица сделок (trades)"""
         try:
             if not self.trade_repo:
                 print(f"{Fore.RED}❌ TradeRepository не инициализирован{Style.RESET_ALL}")
-                input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
+                input(f"\n{Fore.GREEN}Нажмите Enter...{Style.RESET_ALL}")
                 return
 
             trades = await self.trade_repo.get_closed_trades(limit=50)
-
             self.clear_screen()
             self.print_header("ИСТОРИЯ СДЕЛОК (TRADES)")
 
             if not trades:
-                print(f"{Fore.YELLOW}📭 Нет закрытых сделок в базе данных{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}📭 Нет закрытых сделок{Style.RESET_ALL}")
             else:
                 table_data = []
                 total_pnl = 0
                 winning_trades = 0
-
                 for trade in trades:
                     pnl = trade.get('pnl', 0)
                     total_pnl += pnl
                     if pnl > 0:
                         winning_trades += 1
-
                     time_str = self.format_time(trade.get('closed_at', ''))
                     date_str = self.format_date(trade.get('closed_at', ''))
-
                     table_data.append([
-                        str(trade.get('id', '')),
-                        trade.get('symbol', ''),
-                        self.format_direction(trade.get('direction', '')),
-                        self.format_price(trade.get('entry_price', 0)),
-                        self.format_price(trade.get('close_price', 0)),
-                        self.format_pnl(pnl),
-                        f"{(pnl / trade.get('entry_price', 1) * 100) if trade.get('entry_price', 0) > 0 else 0:.2f}%",
-                        trade.get('close_reason', '-'),
-                        f"{date_str} {time_str}"
+                        str(trade.get('id', '')), trade.get('symbol', ''), self.format_direction(trade.get('direction', '')),
+                        self.format_price(trade.get('entry_price', 0)), self.format_price(trade.get('close_price', 0)),
+                        self.format_pnl(pnl), f"{(pnl / trade.get('entry_price', 1) * 100) if trade.get('entry_price', 0) > 0 else 0:.2f}%",
+                        trade.get('close_reason', '-'), f"{date_str} {time_str}"
                     ])
 
                 headers = ["ID", "Монета", "Тип", "Entry", "Close", "PnL", "PnL %", "Причина", "Время"]
@@ -765,13 +724,10 @@ class ThreeScreenMonitor:
 
         except Exception as e:
             print(f"{Fore.RED}❌ Ошибка: {e}{Style.RESET_ALL}")
-            import traceback
-            traceback.print_exc()
-
         input(f"\n{Fore.GREEN}Нажмите Enter для продолжения...{Style.RESET_ALL}")
 
     async def display_signal_details(self, signal_id: int):
-        """Детальная информация о сигнале"""
+        """Детальная информация о сигнале с разделением планируемых/фактических данных"""
         try:
             if not self.signal_repo:
                 print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
@@ -783,13 +739,20 @@ class ThreeScreenMonitor:
                 input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
                 return
 
-            current_price = await self.get_current_price(signal.get('symbol', ''))
+            # Получаем текущую цену через DataProvider
+            current_price = None
+            if self.data_provider:
+                current_price = await self.get_current_price(signal.get('symbol', ''))
             if not current_price:
                 current_price = signal.get('entry_price', 0)
 
+            # Получаем связанную сделку (фактическое исполнение)
             trade = None
             if self.trade_repo:
                 trade = await self.trade_repo.get_trade_by_signal_id(signal_id)
+
+            # Получаем состояние счёта
+            account_state = await self.get_account_state()
 
             self.clear_screen()
             self.print_header(f"ДЕТАЛИ СИГНАЛА #{signal_id}")
@@ -797,144 +760,195 @@ class ThreeScreenMonitor:
             signal_subtype = signal.get('signal_subtype', '')
             status = signal.get('status', '')
 
+            # ========== ОСНОВНАЯ ИНФОРМАЦИЯ ==========
             print(f"{Fore.CYAN}🎯 ОСНОВНАЯ ИНФОРМАЦИЯ{Style.RESET_ALL}")
             print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
             print(f"  Монета:        {Fore.WHITE}{signal.get('symbol', 'N/A')}{Style.RESET_ALL}")
-            print(f"  Тип сигнала:   {self.format_direction(signal.get('direction', ''))}")
-            print(f"  Экран:         {self.format_screen(signal_subtype)}")
+            print(f"  Направление:   {self.format_direction(signal.get('direction', ''))}")
+            print(f"  Тип сигнала:   {self.format_screen(signal_subtype)}")
             print(f"  Статус:        {self.format_status(status)}")
             print(f"  Уверенность:   {self.format_confidence(signal.get('confidence', 0))}")
 
+            # ========== ПЛАНИРУЕМЫЕ ПАРАМЕТРЫ ==========
+            print(f"\n{Fore.CYAN}📋 ПЛАНИРУЕМЫЕ ПАРАМЕТРЫ (из сигнала){Style.RESET_ALL}")
+            print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
+            print(
+                f"  Планируемая цена входа: {Fore.WHITE}{self.format_price(signal.get('entry_price', 0))}{Style.RESET_ALL}")
+            print(
+                f"  Планируемый SL:         {Fore.RED}{self.format_price(signal.get('stop_loss', 0))}{Style.RESET_ALL}")
+            print(
+                f"  Планируемый TP:         {Fore.GREEN}{self.format_price(signal.get('take_profit', 0))}{Style.RESET_ALL}")
+
             if signal_subtype == 'WATCH':
-                print(f"\n{Fore.CYAN}👀 WATCH ПАРАМЕТРЫ{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
-                print(f"  Зона входа:    {self.format_zone(signal.get('zone_low', 0), signal.get('zone_high', 0))}")
-                print(f"  Score Screen2: {self.format_score(signal.get('screen2_score', 0))}")
-                print(f"  Ожидаемый паттерн: {Fore.WHITE}{signal.get('expected_pattern', '—')}{Style.RESET_ALL}")
+                print(
+                    f"  Зона входа (WATCH):     {self.format_zone(signal.get('zone_low', 0), signal.get('zone_high', 0))}")
+                print(f"  Score Screen2:          {self.format_score(signal.get('screen2_score', 0))}")
+                print(f"  Ожидаемый паттерн:      {Fore.WHITE}{signal.get('expected_pattern', '—')}{Style.RESET_ALL}")
+            elif signal.get('trigger_pattern'):
+                print(f"  Паттерн-триггер:        {Fore.WHITE}{signal.get('trigger_pattern', '—')}{Style.RESET_ALL}")
 
-            else:
-                print(f"\n{Fore.CYAN}💸 ТОРГОВЫЕ ПАРАМЕТРЫ{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
-                print(f"  Цена входа:    {Fore.WHITE}{self.format_price(signal.get('entry_price', 0))}{Style.RESET_ALL}")
-                print(f"  Stop Loss:     {Fore.RED}{self.format_price(signal.get('stop_loss', 0))}{Style.RESET_ALL}")
-                print(f"  Take Profit:   {Fore.GREEN}{self.format_price(signal.get('take_profit', 0))}{Style.RESET_ALL}")
-                print(f"  Risk/Reward:   {self.format_rr_ratio(signal.get('risk_reward_ratio', 0))}")
-                print(f"  Паттерн:       {Fore.WHITE}{signal.get('trigger_pattern', '—')}{Style.RESET_ALL}")
-
-                if signal.get('zone_low', 0) > 0:
-                    print(f"  Зона входа:    {self.format_zone(signal.get('zone_low', 0), signal.get('zone_high', 0))}")
-                if signal.get('screen2_score', 0) > 0:
-                    print(f"  Score Screen2: {self.format_score(signal.get('screen2_score', 0))}")
-
-            print(f"\n{Fore.CYAN}📈 ТЕКУЩАЯ СИТУАЦИЯ{Style.RESET_ALL}")
+            # ========== ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ ==========
+            print(f"\n{Fore.CYAN}⚡ ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ (из trades){Style.RESET_ALL}")
             print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
-            print(f"  Текущая цена:  {Fore.WHITE}{self.format_price(current_price)}{Style.RESET_ALL}")
-
-            entry = signal.get('entry_price', 0)
-            if entry > 0 and current_price > 0:
-                distance_to_entry = current_price - entry
-                distance_pct = (distance_to_entry / entry) * 100
-
-                if signal.get('direction', '').upper() == 'BUY':
-                    if distance_to_entry > 0:
-                        status_emoji = "📈"
-                        status_text = "цена выше входа"
-                    else:
-                        status_emoji = "📉"
-                        status_text = "цена ниже входа"
-                else:
-                    if distance_to_entry < 0:
-                        status_emoji = "📈"
-                        status_text = "цена ниже входа (SELL)"
-                    else:
-                        status_emoji = "📉"
-                        status_text = "цена выше входа (SELL)"
-
-                print(f"  Расстояние до входа: {self.format_price(distance_to_entry)} ({distance_pct:+.2f}%)")
-                print(f"    → {status_emoji} {status_text}")
-
-            print(f"\n{Fore.CYAN}⏱ ВРЕМЯ{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
-            created_utc = signal.get('created_time', '')
-            if created_utc:
-                local_dt = self.utc_to_local(created_utc)
-                print(f"  Создан:        {Fore.WHITE}{local_dt.strftime('%d.%m.%Y %H:%M:%S')} (UTC+{self.timezone_offset}){Style.RESET_ALL}")
-
-            expiration = signal.get('expiration_time')
-            if expiration:
-                exp_local = self.utc_to_local(expiration)
-                now_local = datetime.now()
-                if exp_local > now_local:
-                    remaining = exp_local - now_local
-                    hours = remaining.seconds // 3600
-                    minutes = (remaining.seconds % 3600) // 60
-                    print(f"  Истекает:      {Fore.WHITE}{exp_local.strftime('%d.%m.%Y %H:%M:%S')} (через {hours}ч {minutes}м){Style.RESET_ALL}")
-                else:
-                    print(f"  Истекает:      {Fore.RED}{exp_local.strftime('%d.%m.%Y %H:%M:%S')} (истек){Style.RESET_ALL}")
 
             if trade:
-                print(f"\n{Fore.CYAN}📝 ИНФОРМАЦИЯ О СДЕЛКЕ{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
-                print(f"  Цена закрытия: {self.format_price(trade.get('close_price', 0))}")
-                print(f"  PnL:           {self.format_pnl(trade.get('pnl', 0))}")
-                print(f"  PnL %:         {trade.get('pnl_percent', 0):+.2f}%")
-                print(f"  Причина:       {Fore.WHITE}{trade.get('close_reason', '—')}{Style.RESET_ALL}")
+                # Реальная цена входа
+                actual_entry = trade.get('entry_price', signal.get('entry_price', 0))
+                print(f"  Реальная цена входа:   {Fore.WHITE}{self.format_price(actual_entry)}{Style.RESET_ALL}")
+
+                # Размер позиции
+                position_size = trade.get('quantity', signal.get('position_size', 0))
+                print(f"  Размер позиции:        {self.format_position_size(position_size)}")
+
+                # Плечо и маржа
+                leverage = trade.get('leverage', signal.get('leverage', 10))
+                if leverage is None:
+                    leverage = 10
+                if actual_entry > 0 and position_size > 0:
+                    position_value = position_size * actual_entry
+                    margin = position_value / leverage
+                    print(f"  Плечо:                 {self.format_leverage(leverage)}")
+                    print(f"  Стоимость позиции:     {Fore.YELLOW}{self.format_price(position_value)}{Style.RESET_ALL}")
+                    print(f"  Маржа (залог):         {Fore.YELLOW}{self.format_price(margin)}{Style.RESET_ALL}")
+
+                # Комиссия
+                commission = trade.get('commission', 0)
+                if commission is not None and commission > 0:
+                    print(f"  Комиссия:              {Fore.YELLOW}{commission:.4f}{Style.RESET_ALL}")
+
+                # Реальные SL/TP (если отличаются)
+                actual_sl = trade.get('stop_loss')
+                actual_tp = trade.get('take_profit')
+                if actual_sl and actual_sl != signal.get('stop_loss', 0):
+                    print(f"  Реальный SL:           {Fore.RED}{self.format_price(actual_sl)}{Style.RESET_ALL}")
+                if actual_tp and actual_tp != signal.get('take_profit', 0):
+                    print(f"  Реальный TP:           {Fore.GREEN}{self.format_price(actual_tp)}{Style.RESET_ALL}")
+
+                # PnL
+                pnl = trade.get('pnl', 0)
+                pnl_pct = trade.get('pnl_percent', 0)
+                if pnl != 0:
+                    pnl_pct_str = f"{pnl_pct:+.2f}%" if pnl_pct is not None else "0.00%"
+                    print(f"  PnL:                   {self.format_pnl(pnl)} ({pnl_pct_str})")
+
+                # Время открытия/закрытия
+                opened_at = trade.get('opened_at')
+                closed_at = trade.get('closed_at')
+                if opened_at:
+                    print(f"  Открыта:               {self.format_datetime(opened_at)}")
+                if closed_at:
+                    print(f"  Закрыта:               {self.format_datetime(closed_at)}")
+
+            else:
+                print(f"  {Fore.YELLOW}Нет данных об исполнении (сигнал не активирован){Style.RESET_ALL}")
+
+            # ========== ВРЕМЕННАЯ ШКАЛА ==========
+            print(f"\n{Fore.CYAN}⏱ ВРЕМЕННАЯ ШКАЛА{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
+
+            timeline_entries = []
+
+            # Сигнал создан
+            created = signal.get('created_time')
+            if created:
+                timeline_entries.append(("📝 Сигнал создан", self.format_datetime(created)))
+
+            # Сигнал истекает/истёк
+            expiration = signal.get('expiration_time')
+            if expiration:
+                # Для отображения пользователю - конвертируем в локальное время
+                exp_local = self.utc_to_local(expiration)
+                now_local = now()
+
+                # Для проверки - используем UTC (как в БД)
+                exp_utc = datetime.fromisoformat(expiration)
+                now_utc = datetime.utcnow()
+
+                if exp_utc > now_utc:
+                    remaining = exp_utc - now_utc
+                    hours = remaining.seconds // 3600
+                    minutes = (remaining.seconds % 3600) // 60
+                    timeline_entries.append(
+                        ("⏰ Сигнал истекает", f"{self.format_datetime(expiration)} (через {hours}ч {minutes}м)"))
+                else:
+                    timeline_entries.append(("⏰ Сигнал истёк", self.format_datetime(expiration)))
+
+            # Позиция открыта (из trades)
+            if trade and trade.get('opened_at'):
+                timeline_entries.append(("⚡ Позиция открыта", self.format_datetime(trade.get('opened_at'))))
+
+            # Позиция закрыта (из trades)
+            if trade and trade.get('closed_at'):
+                timeline_entries.append(("🔒 Позиция закрыта", self.format_datetime(trade.get('closed_at'))))
+
+            # Обновлён
+            updated = signal.get('updated_time')
+            if updated and updated != created:
+                timeline_entries.append(("🔄 Сигнал обновлён", self.format_datetime(updated)))
+
+            for label, time_str in timeline_entries:
+                print(f"  {label:<20} {time_str}")
+
+            # ========== СОСТОЯНИЕ СЧЁТА ==========
+            print(f"\n{Fore.CYAN}💰 СОСТОЯНИЕ СЧЁТА{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
+            print(f"  Депозит (начальный):    {Fore.WHITE}{account_state['initial_balance']:.2f} USDT{Style.RESET_ALL}")
+            print(f"  Текущий баланс:         {Fore.WHITE}{account_state['current_balance']:.2f} USDT{Style.RESET_ALL}")
+            print(f"  Использовано маржи:     {Fore.YELLOW}{account_state['used_margin']:.2f} USDT{Style.RESET_ALL}")
+            print(
+                f"  Зарезервировано (WATCH):{Fore.YELLOW}{account_state['reserved_for_watch']:.2f} USDT{Style.RESET_ALL}")
+            print(
+                f"  Доступно средств:       {Fore.GREEN if account_state['available'] > 0 else Fore.RED}{account_state['available']:.2f} USDT{Style.RESET_ALL}")
+            print(f"  Общий PnL:              {self.format_pnl(account_state['total_pnl'])}")
 
             print(f"\n{Fore.CYAN}{'=' * 80}{Style.RESET_ALL}")
             input(f"\n{Fore.GREEN}Нажмите Enter для возврата в меню...{Style.RESET_ALL}")
 
         except Exception as e:
             print(f"{Fore.RED}❌ Ошибка при отображении деталей: {e}{Style.RESET_ALL}")
+            import traceback
+            traceback.print_exc()
             input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
 
     async def display_all_signals(self):
-        """Таблица всех сигналов"""
         try:
             if not self.signal_repo:
                 print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
                 return
 
             signals = await self.signal_repo.get_signals(limit=50)
-
             self.clear_screen()
             self.print_header("ВСЕ СИГНАЛЫ")
 
             if not signals:
-                print(f"{Fore.YELLOW}📭 Нет сигналов в базе данных{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}📭 Нет сигналов{Style.RESET_ALL}")
             else:
                 table_data = []
                 for signal in signals:
                     time_str = self.format_time(signal.get('created_time', ''))
                     date_str = self.format_date(signal.get('created_time', ''))
-
                     signal_subtype = signal.get('signal_subtype', '')
                     zone_str = self.format_zone(signal.get('zone_low', 0), signal.get('zone_high', 0))
                     score_str = self.format_score(signal.get('screen2_score', 0))
 
                     table_data.append([
-                        str(signal.get('id', '')),
-                        signal.get('symbol', ''),
-                        self.format_screen(signal_subtype),
-                        self.format_direction(signal.get('direction', '')),
-                        self.format_status(signal.get('status', '')),
-                        self.format_price(signal.get('entry_price', 0)),
-                        zone_str,
-                        score_str,
-                        self.format_rr_ratio(signal.get('risk_reward_ratio', 0)),
-                        f"{date_str} {time_str}"
+                        str(signal.get('id', '')), signal.get('symbol', ''), self.format_screen(signal_subtype),
+                        self.format_direction(signal.get('direction', '')), self.format_status(signal.get('status', '')),
+                        self.format_price(signal.get('entry_price', 0)), zone_str, score_str,
+                        self.format_rr_ratio(signal.get('risk_reward_ratio', 0)), f"{date_str} {time_str}"
                     ])
 
                 headers = ["ID", "Монета", "Тип", "Напр", "Статус", "Entry", "Зона", "Score", "R/R", "Время"]
                 table = self.create_table(headers, table_data)
                 print(table)
 
-                print(f"\n{Fore.CYAN}📈 СТАТИСТИКА:{Style.RESET_ALL}")
                 active_count = sum(1 for s in signals if s.get('status', '').lower() in ['watch', 'active'])
                 watch_count = sum(1 for s in signals if s.get('signal_subtype', '') == 'WATCH')
                 m15_count = sum(1 for s in signals if s.get('signal_subtype', '') == 'M15')
                 buy_count = sum(1 for s in signals if s.get('direction', '').lower() == 'buy')
                 sell_count = sum(1 for s in signals if s.get('direction', '').lower() == 'sell')
 
+                print(f"\n{Fore.CYAN}📈 СТАТИСТИКА:{Style.RESET_ALL}")
                 print(f"   Всего сигналов: {len(signals)}")
                 print(f"   Активных: {active_count}")
                 print(f"   WATCH: {watch_count} | M15: {m15_count}")
@@ -942,21 +956,19 @@ class ThreeScreenMonitor:
 
         except Exception as e:
             print(f"{Fore.RED}❌ Ошибка: {e}{Style.RESET_ALL}")
-
         input(f"\n{Fore.GREEN}Нажмите Enter для продолжения...{Style.RESET_ALL}")
 
-    async def wait_for_enter(self):
+    @staticmethod
+    async def _wait_for_enter():
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, input)
 
     async def display_database_stats(self):
-        """Отображение статистики БД"""
         if not self.signal_repo:
             print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
             return
 
         stats = await self.signal_repo.get_database_stats()
-
         self.clear_screen()
         self.print_header("СТАТИСТИКА БАЗЫ ДАННЫХ")
 
@@ -977,10 +989,21 @@ class ThreeScreenMonitor:
         input(f"\n{Fore.GREEN}Нажмите Enter для продолжения...{Style.RESET_ALL}")
 
     async def main_menu(self):
-        """Главное меню монитора"""
         while True:
             self.clear_screen()
-            self.print_header("THREE SCREEN ANALYZER - МОНИТОР СИГНАЛОВ (v1.3.6)")
+            self.print_header("THREE SCREEN ANALYZER - МОНИТОР СИГНАЛОВ (v1.3.8)")
+
+            account_state = await self.get_account_state()
+
+            print(f"{Fore.YELLOW}💰 СОСТОЯНИЕ СЧЁТА:{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
+            print(f"  Депозит (начальный):    {Fore.WHITE}{account_state['initial_balance']:.2f} USDT{Style.RESET_ALL}")
+            print(f"  Текущий баланс:         {Fore.WHITE}{account_state['current_balance']:.2f} USDT{Style.RESET_ALL}")
+            print(f"  Использовано маржи:     {Fore.YELLOW}{account_state['used_margin']:.2f} USDT{Style.RESET_ALL}")
+            print(f"  Зарезервировано (WATCH):{Fore.YELLOW}{account_state['reserved_for_watch']:.2f} USDT{Style.RESET_ALL}")
+            print(f"  Доступно средств:       {Fore.GREEN if account_state['available'] > 0 else Fore.RED}{account_state['available']:.2f} USDT{Style.RESET_ALL}")
+            print(f"  Общий PnL:              {self.format_pnl(account_state['total_pnl'])}")
+            print()
 
             print(f"{Fore.YELLOW}📋 ВЫБЕРИТЕ РЕЖИМ РАБОТЫ:{Style.RESET_ALL}")
             print("1. 📊 Реалтайм монитор (WATCH + M15)")
@@ -992,8 +1015,8 @@ class ThreeScreenMonitor:
             print("7. 🚪 Выход")
             print()
             print(f"{Fore.CYAN}🕐 Локальное время: UTC+{self.timezone_offset}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}📌 Типы сигналов: WATCH (зона интереса) и M15 (рыночный ордер){Style.RESET_ALL}")
-            print(f"{Fore.CYAN}📂 Папка экспорта: {self._get_export_dir()}{Style.RESET_ALL}")
+            export_dir = self._get_export_dir()
+            print(f"{Fore.CYAN}📂 Папка экспорта: {export_dir}{Style.RESET_ALL}")
 
             try:
                 choice = input(f"\n{Fore.CYAN}🎯 Выбор (1-7): {Style.RESET_ALL}").strip()
@@ -1024,12 +1047,8 @@ class ThreeScreenMonitor:
             except KeyboardInterrupt:
                 print(f"\n{Fore.YELLOW}🛑 Выход...{Style.RESET_ALL}")
                 break
-            except Exception as e:
-                logger.error(f"❌ Ошибка в главном меню: {e}")
-                await asyncio.sleep(1)
 
     async def run(self):
-        """Запуск монитора"""
         try:
             if not self.signal_repo:
                 print(f"{Fore.RED}❌ SignalRepository не найден{Style.RESET_ALL}")
@@ -1043,18 +1062,13 @@ class ThreeScreenMonitor:
                 await self.trade_repo.initialize()
 
             print(f"{Fore.GREEN}✅ База данных подключена: {self.db_path}{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}✅ Папка экспорта: {self._get_export_dir()}{Style.RESET_ALL}")
             await self.main_menu()
         except KeyboardInterrupt:
             print(f"\n{Fore.YELLOW}🛑 Монитор остановлен{Style.RESET_ALL}")
-        except Exception as e:
-            print(f"{Fore.RED}❌ Критическая ошибка: {e}{Style.RESET_ALL}")
 
 
 async def main():
-    print(f"{Fore.GREEN}🚀 Запуск Three Screen Analyzer Monitor (v1.3.6)...{Style.RESET_ALL}")
-    os.environ['TERM'] = os.environ.get('TERM', 'xterm-256color')
-
+    print(f"{Fore.GREEN}🚀 Запуск Three Screen Analyzer Monitor (v1.3.8)...{Style.RESET_ALL}")
     monitor = ThreeScreenMonitor()
     await monitor.run()
 
@@ -1064,5 +1078,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print(f"\n{Fore.YELLOW}👋 Программа завершена{Style.RESET_ALL}")
-    except Exception as e:
-        print(f"{Fore.RED}💥 Фатальная ошибка: {e}{Style.RESET_ALL}")

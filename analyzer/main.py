@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# analyzer/main.py (ИСПРАВЛЕННЫЙ - единая папка logs)
+# analyzer/main.py (ИСПРАВЛЕННЫЙ - С DATAPROVIDER, УБРАН API_CLIENT)
 """
 🚀 ГЛАВНЫЙ ЗАПУСКАЕМЫЙ ФАЙЛ ДЛЯ АНАЛИЗАТОРА СИГНАЛОВ
-ФАЗА 1.3.6.1: Финальная архитектура
+ФАЗА 1.3.7: Финальная архитектура + DataProvider
 - WATCH сигналы (монеты в зоне интереса)
 - M15 сигналы (рыночные ордера, 3ч, R/R ≥ 3:1)
 - WebSocket для раннего входа
 - Только MARKET ордера
+- DataProvider — единый источник данных для всего бота
 """
 
 import asyncio
@@ -17,12 +18,11 @@ from typing import List, Dict, Any
 from datetime import datetime
 from pathlib import Path
 
-from analyzer.core.api_client_bybit import BybitAPIClient
 from analyzer.core.orchestrator import AnalysisOrchestrator
 from analyzer.core.event_bus import event_bus, EventType, Event
 from analyzer.core.position_manager import PositionManager
+from analyzer.core.data_provider import data_provider
 
-# ✅ ИСПРАВЛЕНО: единая папка logs
 PROJECT_ROOT = Path(__file__).parent.parent
 LOG_DIR = PROJECT_ROOT / 'logs' / 'bot'
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -39,14 +39,17 @@ logger = logging.getLogger('signal_generator')
 
 
 class SignalGeneratorService:
-    """Главный сервис генерации сигналов (Фаза 1.3.6.1)"""
+    """Главный сервис генерации сигналов (Фаза 1.3.7)"""
 
     def __init__(self, config_path: str = 'analyzer/config/config.yaml'):
         self.config_path = config_path
         self.config = self._load_config()
-        self.api_client = None
         self.orchestrator = None
         self.position_manager = None
+
+        # ✅ ИНИЦИАЛИЗАЦИЯ DATAPROVIDER (единый источник данных)
+        data_provider.configure(self.config)
+        logger.info("✅ DataProvider сконфигурирован")
 
         self.market_type = self.config.get('market_type', 'linear')
         logger.info(f"🎯 Рынок: {self.market_type.upper()} ({'FUTURES' if self.market_type == 'linear' else 'SPOT'})")
@@ -82,7 +85,7 @@ class SignalGeneratorService:
     async def initialize(self) -> bool:
         """Инициализация всех компонентов"""
         try:
-            logger.info("🚀 Инициализация SignalGeneratorService (Фаза 1.3.6.1)...")
+            logger.info("🚀 Инициализация SignalGeneratorService (Фаза 1.3.7)...")
 
             await event_bus.start()
             logger.info("✅ EventBus запущен")
@@ -90,25 +93,20 @@ class SignalGeneratorService:
             event_bus.subscribe(EventType.TRADING_SIGNAL_GENERATED, self._on_signal_generated)
             logger.info("✅ Подписка на события сигналов выполнена")
 
-            self.api_client = BybitAPIClient(self.config)
-            api_init = await self.api_client.initialize()
-            if not api_init:
-                logger.error("❌ Не удалось инициализировать API клиент")
-                return False
-
             from analyzer.core.signal_repository import signal_repository
             repo_init = await signal_repository.initialize()
             if not repo_init:
                 logger.warning("⚠️ Не удалось инициализировать репозиторий сигналов")
 
-            self.orchestrator = AnalysisOrchestrator(self.api_client, self.config)
+            # ✅ ИСПРАВЛЕНО: orchestrator больше не принимает api_client
+            self.orchestrator = AnalysisOrchestrator(self.config)
             orchestrator_init = await self.orchestrator.initialize()
             if not orchestrator_init:
                 logger.error("❌ Не удалось инициализировать оркестратор")
                 return False
 
             logger.info("🎯 Инициализация Position Manager (только MARKET ордера)...")
-            self.position_manager = PositionManager(self.config, self.api_client)
+            self.position_manager = PositionManager(self.config)
             pm_init = await self.position_manager.initialize()
             if not pm_init:
                 logger.warning("⚠️ Position Manager не инициализирован")
@@ -181,7 +179,7 @@ class SignalGeneratorService:
 
     async def continuous_monitoring(self, interval_seconds: int = 60):
         """Циклический мониторинг каждые N секунд"""
-        logger.info(f"🔄 Запуск циклического мониторинга (Фаза 1.3.6.1)")
+        logger.info(f"🔄 Запуск циклического мониторинга (Фаза 1.3.7)")
         logger.info(f"   Интервал: {interval_seconds} сек")
         logger.info(f"   Типы сигналов: WATCH (зона интереса) и M15 (рыночный ордер)")
         logger.info(f"   Логи сохраняются в: {LOG_DIR / 'signal_generator.log'}")
@@ -197,8 +195,9 @@ class SignalGeneratorService:
                 logger.info(f"🔄 ИТЕРАЦИЯ #{iteration} - {datetime.now().strftime('%H:%M:%S')}")
                 logger.info(f"{'=' * 60}")
 
+                # ✅ Используем DataProvider для получения списка символов
                 logger.info("📡 Получение списка всех торговых пар...")
-                all_symbols = await self.api_client.get_all_symbols()
+                all_symbols = await data_provider.get_all_symbols()
 
                 if not all_symbols:
                     logger.warning("❌ Не удалось получить список символов")
@@ -270,8 +269,9 @@ class SignalGeneratorService:
 
         if self.orchestrator:
             await self.orchestrator.cleanup()
-        if self.api_client:
-            await self.api_client.close()
+
+        # ✅ Закрываем DataProvider
+        await data_provider.close()
 
         logger.info("✅ Ресурсы очищены")
 
@@ -282,7 +282,7 @@ async def main():
 
     try:
         logger.info("=" * 60)
-        logger.info("🚀 ЗАПУСК БОТА (ФАЗА 1.3.6.1)")
+        logger.info("🚀 ЗАПУСК БОТА (ФАЗА 1.3.7)")
         logger.info("=" * 60)
         logger.info("🎯 НАСТРОЙКИ:")
         logger.info("   - Типы сигналов: WATCH (зона интереса) и M15 (рыночный ордер)")

@@ -13,12 +13,11 @@ import logging
 import time
 import hmac
 import hashlib
-import json
-from typing import Dict, List, Optional, Any, Union
-from datetime import datetime, timedelta
+
+from typing import Dict, List, Optional, Any
+
 from urllib.parse import urlencode
 
-import aiohttp
 from aiohttp import ClientSession, ClientTimeout
 
 logger = logging.getLogger('api_client_bybit')
