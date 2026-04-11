@@ -1,4 +1,12 @@
-# analyzer/core/three_screen_analyzer.py (ПОЛНОСТЬЮ - С DATAPROVIDER)
+# analyzer/core/three_screen_analyzer.py (ПОЛНОСТЬЮ - ФАЗА 1.3.10)
+"""
+🎯 THREE SCREEN ANALYZER - Координатор трёхэкранного анализа
+
+ФАЗА 1.3.10:
+- Screen 2 и Screen 3 ОТКЛЮЧЕНЫ
+- Выполняется только анализ тренда D1
+- Добавлено сохранение тренда в БД через _save_trend_analysis()
+"""
 
 import logging
 from datetime import datetime
@@ -47,7 +55,7 @@ class ThreeScreenAnalyzer:
         self._initialized = False
         self._analysis_start_time = None
 
-        logger.info(f"✅ ThreeScreenAnalyzer создан (Фаза 1.3.7) — использует DataProvider")
+        logger.info(f"✅ ThreeScreenAnalyzer создан (Фаза 1.3.10) — использует DataProvider, Screen 2/3 отключены")
 
     def _get_cache_key(self, symbol: str, timeframe: str, calculation_type: str) -> str:
         return f"{symbol}_{timeframe}_{calculation_type}"
@@ -162,7 +170,14 @@ class ThreeScreenAnalyzer:
             return {}
 
     async def analyze_symbol(self, symbol: str) -> Optional[ThreeScreenAnalysis]:
-        logger.info(f"🚀 Начинаем трехэкранный анализ для {symbol}")
+        """
+        Анализ символа по трёхэкранной методологии
+
+        ФАЗА 1.3.10: Screen 2 и Screen 3 ОТКЛЮЧЕНЫ
+        Выполняется только анализ тренда D1 и сохранение в БД
+        ТОЛЬКО ЕСЛИ ТРЕНД ПРОШЁЛ ФИЛЬТР (passed=True)
+        """
+        logger.info(f"🚀 Начинаем анализ тренда для {symbol} (Фаза 1.3.10)")
 
         self._analysis_start_time = datetime.now()
 
@@ -180,33 +195,19 @@ class ThreeScreenAnalyzer:
 
             screen1_result = await self._analyze_screen1(symbol, klines_data)
 
-            if not screen1_result.passed:
-                return await self._create_final_analysis(symbol, screen1_result)
+            # 🔒 ФАЗА 1.3.10: Screen 2 и Screen 3 ВРЕМЕННО ОТКЛЮЧЕНЫ
+            logger.info(f"⚠️ {symbol}: Screen 2 и Screen 3 отключены (Фаза 1.3.10)")
 
-            screen2_result = await self._analyze_screen2(symbol, klines_data, screen1_result)
+            # ✅ ИСПРАВЛЕНИЕ: Сохраняем тренд ТОЛЬКО если он прошёл фильтр Screen 1
+            if screen1_result.passed:
+                await self._save_trend_analysis(symbol, screen1_result)
+            else:
+                adx = screen1_result.indicators.get('adx', 0)
+                structure = screen1_result.indicators.get('structure', 'NONE')
+                logger.info(
+                    f"⏭️ {symbol}: тренд НЕ ПРОШЁЛ фильтр (ADX={adx:.1f}, структура={structure}) — НЕ сохраняется в БД")
 
-            if not screen2_result.passed:
-                return await self._create_final_analysis(symbol, screen1_result, screen2_result)
-
-            screen3_result = await self._analyze_screen3(symbol, klines_data, screen1_result, screen2_result)
-
-            if screen3_result and screen3_result.passed:
-                signal_subtype = getattr(screen3_result, 'signal_subtype', 'M15')
-
-                if signal_subtype == 'M15':
-                    current_price = await self.data_provider.get_current_price(symbol, force_refresh=True)
-                    if current_price:
-                        deviation_pct = abs(
-                            current_price - screen3_result.entry_price) / screen3_result.entry_price * 100
-
-                        if deviation_pct > self.max_slippage_pct:
-                            logger.warning(
-                                f"⚠️ M15 сигнал для {symbol} отклонён: отклонение {deviation_pct:.2f}% > {self.max_slippage_pct}%"
-                            )
-                            screen3_result.passed = False
-                            screen3_result.rejection_reason = f"Отклонение цены {deviation_pct:.2f}% > {self.max_slippage_pct}%"
-
-            return await self._create_final_analysis(symbol, screen1_result, screen2_result, screen3_result)
+            return await self._create_final_analysis(symbol, screen1_result, None, None)
 
         except Exception as e:
             logger.error(f"Ошибка при анализе {symbol}: {str(e)}")
@@ -227,7 +228,6 @@ class ThreeScreenAnalyzer:
         h4_klines = klines_data.get('4h', [])
         h1_klines = klines_data.get('1h', [])
 
-        # Преобразование: список списков → список словарей
         def convert_klines(klines_list):
             if not klines_list:
                 return []
@@ -245,17 +245,14 @@ class ThreeScreenAnalyzer:
 
         h4_data = convert_klines(h4_klines)
 
-        # Получаем текущую цену
         current_price = screen1_result.indicators.get('current_price', 0)
         if current_price == 0 and h4_data:
             current_price = h4_data[-1]['close']
 
-        # Вызываем analyze
         result = self.screen2_analyzer.analyze(
             h4_data, screen1_result.trend_direction, current_price, symbol
         )
 
-        # Преобразуем результат в Screen2Result
         screen2 = Screen2Result()
         screen2.passed = result.get('success', False)
         screen2.confidence = result.get('score', 0) / 5.0 if result.get('score') else 0
@@ -267,13 +264,208 @@ class ThreeScreenAnalyzer:
 
         return screen2
 
+    async def _get_h4_trend(self, symbol: str, klines_data: Dict) -> Dict[str, Any]:
+        h4_config = self.config.get('analysis', {}).get('h4_filter', {})
+        enabled = h4_config.get('enabled', True)
+
+        if not enabled:
+            return {
+                'direction': 'SIDEWAYS',
+                'strength': 0,
+                'passed': True
+            }
+
+        adx_threshold = h4_config.get('adx_threshold', 25)
+
+        h4_klines = klines_data.get('4h', [])
+        if not h4_klines or len(h4_klines) < 20:
+            logger.warning(f"⚠️ {symbol}: Недостаточно H4 данных для ADX")
+            return {
+                'direction': 'SIDEWAYS',
+                'strength': 0,
+                'passed': True
+            }
+
+        try:
+            highs = [float(k[2]) for k in h4_klines[-20:]]
+            lows = [float(k[3]) for k in h4_klines[-20:]]
+            closes = [float(k[4]) for k in h4_klines[-20:]]
+
+            adx_value = self._calculate_adx(highs, lows, closes, period=14)
+
+            if adx_value is None:
+                return {
+                    'direction': 'SIDEWAYS',
+                    'strength': 0,
+                    'passed': True
+                }
+
+            if adx_value > adx_threshold:
+                trend_dir = self._determine_h4_direction(closes)
+                logger.info(f"📊 {symbol}: H4 ADX={adx_value:.1f} > {adx_threshold}, тренд={trend_dir}")
+                return {
+                    'direction': trend_dir,
+                    'strength': adx_value,
+                    'passed': True
+                }
+            else:
+                logger.info(f"📊 {symbol}: H4 ADX={adx_value:.1f} ≤ {adx_threshold} (флэт), оба направления разрешены")
+                return {
+                    'direction': 'SIDEWAYS',
+                    'strength': adx_value,
+                    'passed': True
+                }
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка расчёта H4 тренда для {symbol}: {e}")
+            return {
+                'direction': 'SIDEWAYS',
+                'strength': 0,
+                'passed': True
+            }
+
+    def _calculate_adx(self, highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[
+        float]:
+        try:
+            if len(highs) < period + 1:
+                return None
+
+            tr_values = []
+            plus_dm_values = []
+            minus_dm_values = []
+
+            for i in range(1, len(highs)):
+                tr = max(
+                    highs[i] - lows[i],
+                    abs(highs[i] - closes[i - 1]),
+                    abs(lows[i] - closes[i - 1])
+                )
+                tr_values.append(tr)
+
+                up_move = highs[i] - highs[i - 1]
+                down_move = lows[i - 1] - lows[i]
+
+                plus_dm = up_move if up_move > down_move and up_move > 0 else 0
+                minus_dm = down_move if down_move > up_move and down_move > 0 else 0
+
+                plus_dm_values.append(plus_dm)
+                minus_dm_values.append(minus_dm)
+
+            atr = self._smooth_wilder(tr_values, period)
+            plus_di_smoothed = self._smooth_wilder(plus_dm_values, period)
+            minus_di_smoothed = self._smooth_wilder(minus_dm_values, period)
+
+            if not atr or atr[-1] == 0:
+                return None
+
+            plus_di = []
+            minus_di = []
+
+            for i in range(min(len(plus_di_smoothed), len(atr))):
+                if atr[i] != 0:
+                    plus_di.append((plus_di_smoothed[i] / atr[i]) * 100)
+                    minus_di.append((minus_di_smoothed[i] / atr[i]) * 100)
+
+            if not plus_di or not minus_di:
+                return None
+
+            dx_values = []
+            for p, m in zip(plus_di, minus_di):
+                if p + m == 0:
+                    dx = 0
+                else:
+                    dx = abs(p - m) / (p + m) * 100
+                dx_values.append(dx)
+
+            adx = self._smooth_wilder(dx_values, period)
+
+            return adx[-1] if adx else None
+
+        except Exception as e:
+            logger.error(f"Ошибка расчёта ADX: {e}")
+            return None
+
+    def _smooth_wilder(self, values: List[float], period: int) -> List[float]:
+        if len(values) < period:
+            return []
+
+        smoothed = [sum(values[:period]) / period]
+
+        for i in range(period, len(values)):
+            prev = smoothed[-1]
+            smoothed.append(prev + (values[i] - prev) / period)
+
+        return smoothed
+
+    def _smooth_sma(self, values: List[float], period: int) -> List[float]:
+        if len(values) < period:
+            return []
+
+        smoothed = []
+        for i in range(period - 1, len(values)):
+            sma = sum(values[i - period + 1:i + 1]) / period
+            smoothed.append(sma)
+
+        return smoothed
+
+    def _determine_h4_direction(self, closes: List[float]) -> str:
+        if len(closes) < 20:
+            return 'SIDEWAYS'
+
+        ema20 = self._calculate_ema(closes, 20)
+        ema50 = self._calculate_ema(closes, 50)
+
+        if not ema20 or not ema50:
+            return 'SIDEWAYS'
+
+        if ema20[-1] > ema50[-1] and closes[-1] > ema20[-1]:
+            return 'BULL'
+        elif ema20[-1] < ema50[-1] and closes[-1] < ema20[-1]:
+            return 'BEAR'
+        else:
+            return 'SIDEWAYS'
+
+    def _calculate_ema(self, prices: List[float], period: int) -> List[float]:
+        if len(prices) < period:
+            return []
+
+        multiplier = 2 / (period + 1)
+        ema = [sum(prices[:period]) / period]
+
+        for price in prices[period:]:
+            ema.append((price * multiplier) + (ema[-1] * (1 - multiplier)))
+
+        return ema
+
     async def _analyze_screen3(self, symbol: str, klines_data: Dict,
                                screen1_result: Screen1Result,
                                screen2_result: Screen2Result) -> Screen3Result:
+        h4_trend_result = await self._get_h4_trend(symbol, klines_data)
+
+        h4_direction = h4_trend_result.get('direction', 'SIDEWAYS')
+        screen1_direction = screen1_result.trend_direction
+
+        if h4_direction == 'BULL':
+            if screen1_direction != 'BULL':
+                logger.info(f"❌ {symbol}: H4 тренд BULL, но D1 тренд {screen1_direction} — пропускаем")
+                result = Screen3Result()
+                result.passed = False
+                result.rejection_reason = f"H4 тренд BULL не совпадает с D1 {screen1_direction}"
+                return result
+        elif h4_direction == 'BEAR':
+            if screen1_direction != 'BEAR':
+                logger.info(f"❌ {symbol}: H4 тренд BEAR, но D1 тренд {screen1_direction} — пропускаем")
+                result = Screen3Result()
+                result.passed = False
+                result.rejection_reason = f"H4 тренд BEAR не совпадает с D1 {screen1_direction}"
+                return result
+        else:
+            logger.info(
+                f"📊 {symbol}: H4 флэт (ADX={h4_trend_result.get('strength', 0):.1f}), оба направления разрешены")
+
         m15_klines = klines_data.get('15m', [])
         m5_klines = klines_data.get('5m', [])
 
-        # Преобразование для screen3
         def convert_klines(klines_list):
             if not klines_list:
                 return []
@@ -389,6 +581,50 @@ class ThreeScreenAnalyzer:
                 logger.error(f"❌ Ошибка сохранения сигнала {symbol}: {e}")
 
         return analysis
+
+    # ========== ФАЗА 1.3.10: НОВЫЙ МЕТОД ДЛЯ СОХРАНЕНИЯ ТРЕНДА ==========
+    async def _save_trend_analysis(self, symbol: str, screen1_result: Screen1Result) -> None:
+        """
+        Сохраняет результаты анализа тренда D1 в БД
+
+        Args:
+            symbol: Символ монеты
+            screen1_result: Результат анализа Screen 1
+        """
+        try:
+            from .signal_repository import signal_repository
+
+            indicators = screen1_result.indicators
+
+            trend_direction = screen1_result.trend_direction
+            adx = indicators.get('adx', 0)
+            ema20 = indicators.get('ema_20', 0)
+            ema50 = indicators.get('ema_50', 0)
+            macd_line = indicators.get('macd_line', 0)
+            macd_signal = indicators.get('macd_signal', 0)
+            structure = "-"  # Структура больше не используется
+            confidence = screen1_result.confidence_score
+
+            trend_id = await signal_repository.save_trend_analysis(
+                symbol=symbol,
+                trend_direction=trend_direction,
+                adx=adx,
+                ema20=ema20,
+                ema50=ema50,
+                macd_line=macd_line,
+                macd_signal=macd_signal,
+                structure=structure,
+                confidence=confidence
+            )
+
+            if trend_id:
+                logger.info(
+                    f"✅ {symbol}: тренд сохранён в БД (ID={trend_id}, направление={trend_direction}, ADX={adx:.1f})")
+            else:
+                logger.warning(f"⚠️ {symbol}: не удалось сохранить тренд в БД")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения тренда {symbol}: {e}")
 
     async def create_signal_from_analysis(self, analysis: ThreeScreenAnalysis):
         logger.info(f"Преобразование анализа в Signal для {analysis.symbol}")

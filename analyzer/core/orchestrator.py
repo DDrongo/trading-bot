@@ -139,18 +139,24 @@ class AnalysisOrchestrator:
         return session
 
     async def _check_duplicate_before_analysis(self, symbol: str, signal_subtype: str) -> bool:
+        """
+        Проверяет, есть ли уже активный сигнал для символа
+
+        ФАЗА 1.3.9.3: Усилена проверка — учитываем также статус 'WATCH' и 'ACTIVE'
+        """
         try:
             expiration_hours = self.duplicate_check_hours.get(signal_subtype, 3)
             is_duplicate = await signal_repository.check_duplicate_signal(symbol, signal_subtype, expiration_hours)
             if is_duplicate:
-                logger.debug(f"⏭️ Пропускаем {symbol} ({signal_subtype}) - есть активный дубликат")
+                logger.info(f"⏭️ Пропускаем {symbol} ({signal_subtype}) - есть активный дубликат")
                 return True
             return False
         except Exception as e:
             logger.error(f"❌ Ошибка проверки дубликата для {symbol}: {e}")
             return False
 
-    async def analyze_symbols_batch(self, symbols: List[str], max_concurrent: int = None) -> Dict[str, ThreeScreenAnalysis]:
+    async def analyze_symbols_batch(self, symbols: List[str], max_concurrent: int = None) -> Dict[
+        str, ThreeScreenAnalysis]:
         logger.info(f"🚀 Начинаем анализ пачки из {len(symbols)} символов")
 
         if max_concurrent is None:
@@ -240,6 +246,7 @@ class AnalysisOrchestrator:
                         position_size = position_value / current_price if current_price > 0 else 0.001
                         position_size = max(0.001, min(1000000.0, position_size))
 
+                        # ⬇️⬇️⬇ ИЗМЕНЕНИЕ: передаём current_price ⬇️⬇️⬇️
                         signal_id = await signal_repository.save_watch_signal(
                             symbol=symbol,
                             direction="BUY" if result.screen1.trend_direction == "BULL" else "SELL",
@@ -250,7 +257,8 @@ class AnalysisOrchestrator:
                             expiration_hours=self.watch_config.get('expiration_hours', 3),
                             position_size=position_size,
                             entry_price=current_price,
-                            leverage=leverage
+                            leverage=leverage,
+                            current_price=current_price  # ← НОВЫЙ ПАРАМЕТР
                         )
                         if signal_id:
                             session.watch_signals += 1

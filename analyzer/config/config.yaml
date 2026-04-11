@@ -1,19 +1,15 @@
-# analyzer/config/config.yaml
-# Конфигурация торгового бота - ФАЗА 1.3.8
-
 analysis:
   symbols:
-    - BTCUSDT
-    - ETHUSDT
-    - SOLUSDT
-    - BNBUSDT
-    - XRPUSDT
-    - ADAUSDT
-    - DOGEUSDT
-    - AVAXUSDT
-    - DOTUSDT
-    - LINKUSDT
-
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+  - BNBUSDT
+  - XRPUSDT
+  - ADAUSDT
+  - DOGEUSDT
+  - AVAXUSDT
+  - DOTUSDT
+  - LINKUSDT
   adx_thresholds:
     moderate: 18.0
     sideways: 0.0
@@ -61,10 +57,10 @@ analysis:
   max_entry_distance_pct: 20.0
   max_risk_per_trade_pct: 2.0
   max_spread_pct: 2.0
-  max_symbols_per_cycle: 50
+  max_symbols_per_cycle: 500
   max_zone_distance_pct: 2.0
   min_24h_volume_usd: 5000000
-  min_price: 0.10
+  min_price: 0.1
   min_rr_ratio: 2.0
   monitoring_interval_seconds: 60
   orchestration:
@@ -104,7 +100,7 @@ analysis:
     simple_bullish_confidence: 0.6
     simple_bullish_min_body_ratio: 0.5
   prefilter:
-    batch_size: 20
+    batch_size: 50
     blacklist:
     - USDCUSDT
     - BUSDUSDT
@@ -116,7 +112,7 @@ analysis:
     cache_ttl_hours: 1
     check_orderbook: true
     min_orderbook_depth: 50000
-    min_price_threshold: 0.10
+    min_price_threshold: 0.1
     orderbook_limit: 10
     whitelist: []
   risk_management:
@@ -162,7 +158,6 @@ analysis:
     send_telegram_on_save: true
     stochastic_confidence_bonus: 0.05
     strong_confidence_threshold: 0.8
-
   signal_types:
     watch:
       enabled: true
@@ -174,7 +169,6 @@ analysis:
       expiration_hours: 3
       order_type: MARKET
       max_slippage_pct: 1.0
-
   structure:
     lookback_period: 6
     ma_bounce_max_distance_pct: 2.0
@@ -208,15 +202,27 @@ analysis:
     strong_zones_bonus: 0.15
     volume_confirmation_bonus: 0.2
     zone_match_tolerance_pct: 1.0
-
+  h4_filter:
+    enabled: true
+    adx_threshold: 25
+  zone_side_check:
+    enabled: true
+  range_filter:
+    enabled: true
+    lookback: 50
+    min_width_pct: 2.0
+    max_width_pct: 10.0
+  max_concurrent_analysis: 10
 api:
   api_key: ${BYBIT_API_KEY}
   api_secret: ${BYBIT_API_SECRET}
   cache:
     ttl_seconds: 60
   exchange: bybit
-  rate_limit: 100
+  rate_limit: 10
   recv_window: 5000
+  request_delay: 0.3
+  max_concurrent_requests: 5
   requests:
     default_order_type: GTC
     max_kline_limit: 1000
@@ -232,9 +238,7 @@ api:
   testnet: false
   timeout: 30
   use_public_api: true
-
 market_type: linear
-
 database:
   backup:
     auto_backup_interval_days: 7
@@ -274,7 +278,6 @@ database:
   statistics:
     balance_history_points: 100
     starting_balance_statistics: 10000.0
-
 database_signals:
   backup:
     auto_backup_days: 7
@@ -294,9 +297,7 @@ database_signals:
     trades_days: 30
   signals_table: signals
   trades_table: trades
-
 mode: paper
-
 monitor:
   auto_clear_screen: true
   colors:
@@ -315,7 +316,7 @@ monitor:
   show_rr_ratio: true
   show_trend_info: true
   table_style: unicode
-
+  signals_limit: 200
 paper_trading:
   balance_management:
     balance_history_limit: 100
@@ -346,7 +347,6 @@ paper_trading:
   telegram_alerts: true
   track_performance: true
   virtual_capital: 10000.0
-
 risk_management:
   check_correlation: false
   max_consecutive_losses: 3
@@ -356,7 +356,6 @@ risk_management:
   position_sizing_method: fixed_percentage
   trailing_stop_distance_pct: 2.0
   use_trailing_stop: false
-
 system:
   api_retry_attempts: 3
   api_retry_delay: 5
@@ -390,7 +389,6 @@ system:
     price_1_100: 3
     price_gt_100: 4
     price_lt_1: 2
-
 telegram:
   bot_token: 7972372871:AAFOa6ymCk0LHWFx7dv5PHGDw304M5XddGE
   chat_id: '-1003117183231'
@@ -414,7 +412,6 @@ telegram:
   send_system_alerts: true
   send_trade_alerts: true
   timeout: 10
-
 trade_executor:
   emergency_stop_enabled: true
   execution_timeout_seconds: 30
@@ -426,11 +423,9 @@ trade_executor:
   max_concurrent_executions: 3
   send_execution_notifications: true
   validate_before_execution: true
-
 trading:
   max_position_per_symbol: 0.1
   max_risk_per_trade: 0.02
-
 position_management:
   enabled: true
   monitoring_interval_seconds: 60
@@ -443,19 +438,17 @@ position_management:
   position_sizing:
     method: risk_based
     risk_per_trade_pct: 2.0
-
 websocket:
   enabled: true
   reconnect_interval: 5
   ping_interval: 20
   ping_timeout: 10
-
 display:
   timezone_offset: 3
   refresh_interval: 5
-  date_format: "%d.%m.%Y"
-  time_format: "%H:%M:%S"
+  date_format: '%d.%m.%Y'
+  time_format: '%H:%M:%S'
   show_emojis: true
-  table_style: "unicode"
+  table_style: unicode
   colors_enabled: true
   max_symbols_per_page: 50

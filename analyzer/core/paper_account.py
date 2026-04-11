@@ -237,9 +237,16 @@ class PaperAccount:
             pnl: float,
             close_reason: str
     ) -> Optional[Dict[str, Any]]:
+        logger.info(
+            f"🔔 PaperAccount: закрытие позиции #{signal_id}, цена={close_price:.6f}, PnL={pnl:+.2f}, причина={close_reason}")
+
         position = self.open_positions.pop(signal_id, None)
         if not position:
+            logger.warning(f"⚠️ PaperAccount: позиция #{signal_id} не найдена для закрытия")
             return None
+
+        old_balance = self.balance
+        old_margin = position.margin
 
         slippage = close_price * self.slippage_pct
         if position.direction == 'BUY':
@@ -283,7 +290,11 @@ class PaperAccount:
         }
         self.closed_positions.append(closed_info)
 
-        logger.info(f"📉 ЗАКРЫТА #{signal_id}: {close_reason}, PnL: {actual_pnl:+.2f}")
+        logger.info(f"📊 PaperAccount: закрыта #{signal_id}: {close_reason}")
+        logger.info(f"   Старый баланс: {old_balance:.2f} USDT")
+        logger.info(f"   Маржа: {old_margin:.2f} USDT")
+        logger.info(f"   PnL: {actual_pnl:+.2f} USDT")
+        logger.info(f"   Новый баланс: {self.balance:.2f} USDT")
 
         return closed_info
 

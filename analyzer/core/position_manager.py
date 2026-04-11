@@ -167,6 +167,9 @@ class PositionManager:
 
     async def _open_position_from_signal(self, signal_data: Dict[str, Any]):
         try:
+            logger.info(
+                f"🔔 Position Manager: получен сигнал {signal_data.get('signal_id')} для {signal_data.get('symbol')}")
+
             signal_id = signal_data['signal_id']
             symbol = signal_data['symbol']
             direction = signal_data['signal_type']
@@ -296,6 +299,8 @@ class PositionManager:
                 },
                 'position_manager'
             )
+
+            logger.info(f"✅ ПОЗИЦИЯ #{signal_id} УСПЕШНО ОТКРЫТА И СОХРАНЕНА В БД")
 
         except Exception as e:
             logger.error(f"❌ Ошибка открытия позиции: {e}")

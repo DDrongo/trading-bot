@@ -1,11 +1,15 @@
 # analyzer/core/data_provider.py
 """
 📦 DATA PROVIDER - Единый источник данных для всего бота
-ФАЗА 1.3.7: Singleton, ленивая инициализация, кеширование
+ФАЗА 1.3.9.1:
+- Исправлен get_order_book (использует self.__client)
+- Добавлена защита от rate limit (задержки + семафор)
 """
 
 import logging
 import time
+import asyncio
+from random import uniform
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger('data_provider')
@@ -35,6 +39,11 @@ class DataProvider:
         self._cache: Dict[str, tuple] = {}
         self._cache_ttl = 60  # секунд
         self._price_cache_ttl = 5  # секунд для текущей цены
+
+        # ФАЗА 1.3.9.1: Rate limit защита
+        self._request_semaphore = None  # Инициализируется в configure
+        self._request_delay = 0.5  # секунд между запросами
+
         self._initialized = True
 
         logger.info("📦 DataProvider создан (Singleton)")
@@ -42,7 +51,21 @@ class DataProvider:
     def configure(self, config: dict) -> None:
         """Передать конфигурацию (вызывается при инициализации бота)"""
         self._config = config
+
+        # ФАЗА 1.3.9.1: Настройки rate limit из конфига
+        api_config = config.get('api', {})
+        self._request_delay = api_config.get('request_delay', 0.5)
+        max_concurrent = api_config.get('max_concurrent_requests', 3)
+        self._request_semaphore = asyncio.Semaphore(max_concurrent)
+
         logger.info("📦 DataProvider сконфигурирован")
+        logger.info(f"   Request delay: {self._request_delay} сек")
+        logger.info(f"   Max concurrent: {max_concurrent}")
+
+    async def _delay(self):
+        """Случайная задержка для избежания rate limit"""
+        actual_delay = uniform(self._request_delay * 0.7, self._request_delay * 1.3)
+        await asyncio.sleep(actual_delay)
 
     async def _get_client(self):
         """Ленивая инициализация BybitAPIClient"""
@@ -75,16 +98,7 @@ class DataProvider:
         self._cache[key] = (data, time.time())
 
     async def get_current_price(self, symbol: str, force_refresh: bool = False) -> Optional[float]:
-        """
-        Получить текущую цену символа
-
-        Args:
-            symbol: Символ (например, BTCUSDT)
-            force_refresh: Принудительное обновление (игнорировать кэш)
-
-        Returns:
-            Текущая цена или None
-        """
+        """Получить текущую цену символа"""
         try:
             cache_key = f"price_{symbol}"
 
@@ -93,13 +107,16 @@ class DataProvider:
                 if cached is not None:
                     return cached
 
-            client = await self._get_client()
-            price = await client.get_current_price(symbol, force_refresh=force_refresh)
+            async with self._request_semaphore:
+                await self._delay()
 
-            if price:
-                self._set_cached(cache_key, price)
+                client = await self._get_client()
+                price = await client.get_current_price(symbol, force_refresh=force_refresh)
 
-            return price
+                if price:
+                    self._set_cached(cache_key, price)
+
+                return price
 
         except Exception as e:
             logger.error(f"❌ Ошибка получения цены {symbol}: {e}")
@@ -113,13 +130,16 @@ class DataProvider:
             if cached is not None:
                 return cached
 
-            client = await self._get_client()
-            klines = await client.get_klines(symbol, interval, limit)
+            async with self._request_semaphore:
+                await self._delay()
 
-            if klines:
-                self._set_cached(cache_key, klines)
+                client = await self._get_client()
+                klines = await client.get_klines(symbol, interval, limit)
 
-            return klines
+                if klines:
+                    self._set_cached(cache_key, klines)
+
+                return klines
 
         except Exception as e:
             logger.error(f"❌ Ошибка получения свечей {symbol} {interval}: {e}")
@@ -133,13 +153,16 @@ class DataProvider:
             if cached is not None:
                 return cached
 
-            client = await self._get_client()
-            ticker = await client.get_24h_ticker(symbol)
+            async with self._request_semaphore:
+                await self._delay()
 
-            if ticker:
-                self._set_cached(cache_key, ticker)
+                client = await self._get_client()
+                ticker = await client.get_24h_ticker(symbol)
 
-            return ticker
+                if ticker:
+                    self._set_cached(cache_key, ticker)
+
+                return ticker
 
         except Exception as e:
             logger.error(f"❌ Ошибка получения тикера {symbol}: {e}")
@@ -153,13 +176,16 @@ class DataProvider:
             if cached is not None:
                 return cached
 
-            client = await self._get_client()
-            symbols = await client.get_all_symbols()
+            async with self._request_semaphore:
+                await self._delay()
 
-            if symbols:
-                self._set_cached(cache_key, symbols)
+                client = await self._get_client()
+                symbols = await client.get_all_symbols()
 
-            return symbols
+                if symbols:
+                    self._set_cached(cache_key, symbols)
+
+                return symbols
 
         except Exception as e:
             logger.error(f"❌ Ошибка получения списка символов: {e}")
@@ -182,17 +208,61 @@ class DataProvider:
             if cached is not None:
                 return cached
 
-            client = await self._get_client()
-            tick_size = await client.get_tick_size(symbol)
+            async with self._request_semaphore:
+                await self._delay()
 
-            if tick_size:
-                self._set_cached(cache_key, tick_size)
+                client = await self._get_client()
+                tick_size = await client.get_tick_size(symbol)
 
-            return tick_size
+                if tick_size:
+                    self._set_cached(cache_key, tick_size)
+
+                return tick_size
 
         except Exception as e:
             logger.error(f"❌ Ошибка получения tick_size для {symbol}: {e}")
             return 0.0001
+
+    # ========== ФАЗА 1.3.9.1: ИСПРАВЛЕННЫЙ get_order_book ==========
+    async def get_order_book(self, symbol: str, limit: int = 10) -> Optional[Dict]:
+        """
+        Получает стакан ордеров
+
+        Args:
+            symbol: Символ (например, 'BTCUSDT')
+            limit: Глубина стакана (1-200)
+
+        Returns:
+            Dict с полями bids и asks, или None при ошибке
+        """
+        try:
+            cache_key = f"orderbook_{symbol}_{limit}"
+            cached = self._get_cached(cache_key, ttl=2)  # Кэш на 2 секунды
+            if cached is not None:
+                return cached
+
+            async with self._request_semaphore:
+                await self._delay()
+
+                client = await self._get_client()
+
+                # Проверяем наличие метода get_orderbook у клиента
+                if hasattr(client, 'get_orderbook'):
+                    orderbook = await client.get_orderbook(symbol, limit)
+                elif hasattr(client, 'get_order_book'):
+                    orderbook = await client.get_order_book(symbol, limit)
+                else:
+                    logger.error(f"❌ API клиент не имеет метода get_orderbook/get_order_book")
+                    return None
+
+                if orderbook:
+                    self._set_cached(cache_key, orderbook)
+
+                return orderbook
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения стакана {symbol}: {e}")
+            return None
 
     def clear_cache(self) -> None:
         """Очистить кэш"""
@@ -215,6 +285,5 @@ class DataProvider:
 
 # Глобальный экземпляр (Singleton)
 data_provider = DataProvider()
-
 
 __all__ = ['DataProvider', 'data_provider']

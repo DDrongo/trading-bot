@@ -1,17 +1,19 @@
-# analyzer/core/data_classes.py (ПОЛНОСТЬЮ - ОБНОВЛЁННАЯ ВЕРСИЯ)
+# analyzer/core/data_classes.py (ОБНОВЛЁННАЯ ВЕРСИЯ - ФАЗА 1.3.10)
 """
 🏷️ КЛАССЫ ДАННЫХ ДЛЯ СИГНАЛОВ И СДЕЛОК
 ФАЗА 1.3.6:
 - Добавлен SignalType.M15 (вместо LIMIT/INSTANT)
 - Добавлены поля zone_* в ThreeScreenAnalysis
 - Обновлён Screen2Result для zone_*
+
+ФАЗА 1.3.10:
+- Добавлен датакласс TrendAnalysis для сохранения результатов D1
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from enum import Enum
-
 
 
 class Direction(Enum):
@@ -273,6 +275,8 @@ class SignalModel:
     zone_high: float = 0.0
     expected_pattern: str = ""
     screen2_score: int = 0
+    current_price_at_signal: float = 0.0
+    position_vs_zone: str = ""  # "ABOVE", "INSIDE", "BELOW"
 
 
 @dataclass
@@ -288,6 +292,23 @@ class PaperTradeModel:
     status: str = ""
     opened_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
+
+
+# ========== ФАЗА 1.3.10: TREND ANALYSIS ==========
+
+@dataclass
+class TrendAnalysis:
+    """Датакласс для сохранения результатов анализа тренда D1 (Фаза 1.3.10)"""
+    symbol: str
+    trend_direction: str  # BULL / BEAR / SIDEWAYS
+    adx: float
+    ema20: float
+    ema50: float
+    macd_line: float
+    macd_signal: float
+    structure: str  # "HH/HL", "LH/LL", "NONE"
+    confidence: float
+    created_time: datetime = field(default_factory=datetime.now)
 
 
 # ========== HELPER METHODS ==========
@@ -413,5 +434,8 @@ __all__ = [
 
     # Database
     'SignalModel',
-    'PaperTradeModel'
+    'PaperTradeModel',
+
+    # Фаза 1.3.10
+    'TrendAnalysis',
 ]

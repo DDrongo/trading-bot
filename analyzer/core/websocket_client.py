@@ -1,14 +1,16 @@
-# analyzer/core/websocket_client.py (НОВЫЙ ФАЙЛ)
+# analyzer/core/websocket_client.py (ПОЛНОСТЬЮ - ФАЗА 1.3.9.2)
 """
 🔌 WEBSOCKET КЛИЕНТ ДЛЯ BYBIT
-ФАЗА 1.3.6: Реальное время для раннего входа
+ФАЗА 1.3.9.2:
+- Добавлено хранение последних цен в словаре
+- Добавлен метод get_latest_price()
 """
 
 import asyncio
 import json
 import logging
 import websockets
-from typing import List, Dict, Callable, Any
+from typing import List, Dict, Callable, Any, Optional
 
 logger = logging.getLogger('websocket_client')
 
@@ -20,6 +22,7 @@ class BybitWebSocketClient:
     - Подписка на ticker для нескольких символов
     - Автоматическое переподключение при разрыве
     - Обработка обновлений цены через колбэки
+    - Хранение последних цен (для монитора)
     """
 
     def __init__(self, symbols: List[str] = None):
@@ -35,6 +38,9 @@ class BybitWebSocketClient:
         self.running = False
         self.reconnect_task = None
         self.ping_task = None
+
+        # ФАЗА 1.3.9.2: Хранилище последних цен
+        self._latest_prices: Dict[str, float] = {}
 
         # Настройки
         self.url = "wss://stream.bybit.com/v5/public/linear"
@@ -59,6 +65,8 @@ class BybitWebSocketClient:
         for symbol in symbols:
             if symbol in self.symbols:
                 self.symbols.remove(symbol)
+            if symbol in self._latest_prices:
+                del self._latest_prices[symbol]
         logger.info(f"➖ Удалены символы: {symbols}")
         # Если уже подключены, обновляем подписку
         if self.running and self.websocket:
@@ -73,6 +81,18 @@ class BybitWebSocketClient:
         """
         self.callbacks.append(callback)
         logger.info(f"➕ Зарегистрирован обработчик цены (всего: {len(self.callbacks)})")
+
+    def get_latest_price(self, symbol: str) -> float:
+        """
+        Получить последнюю известную цену символа
+
+        ФАЗА 1.3.9.2: Добавлен для монитора
+        """
+        return self._latest_prices.get(symbol, 0.0)
+
+    def get_all_prices(self) -> Dict[str, float]:
+        """Получить все последние цены"""
+        return self._latest_prices.copy()
 
     async def connect(self):
         """Подключение к WebSocket и запуск прослушивания"""
@@ -202,6 +222,9 @@ class BybitWebSocketClient:
                 if symbol and price_str:
                     price = float(price_str)
 
+                    # ФАЗА 1.3.9.2: Сохраняем последнюю цену
+                    self._latest_prices[symbol] = price
+
                     # Логируем только каждые 10 обновлений для снижения шума
                     if not hasattr(self, '_update_counter'):
                         self._update_counter = {}
@@ -251,7 +274,8 @@ class BybitWebSocketClient:
             except:
                 pass
 
-        # Очищаем колбэки
+        # Очищаем данные
+        self._latest_prices.clear()
         self.callbacks.clear()
 
         logger.info("✅ WebSocket закрыт")
@@ -263,6 +287,7 @@ class BybitWebSocketClient:
             'symbols_count': len(self.symbols),
             'symbols': self.symbols,
             'callbacks_count': len(self.callbacks),
+            'prices_count': len(self._latest_prices),
             'url': self.url,
             'reconnect_interval': self.reconnect_interval
         }

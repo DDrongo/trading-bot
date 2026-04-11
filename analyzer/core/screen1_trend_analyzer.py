@@ -1,6 +1,11 @@
-# core/screen1_trend_analyzer.py
+# core/screen1_trend_analyzer.py (ОБНОВЛЁННАЯ ВЕРСИЯ - ФАЗА 1.3.10)
 """
 🎯 ЭКРАН 1 - ПОЛНЫЙ АНАЛИЗ ТРЕНДА (Дневной таймфрейм)
+
+ФАЗА 1.3.10:
+- Добавлен расчёт EMA20
+- Добавлено определение структуры тренда (HH/HL, LH/LL, NONE)
+- Сохранение структуры в indicators
 """
 
 import logging
@@ -20,6 +25,7 @@ class Screen1Result:
     key_levels: Dict[str, float] = field(default_factory=dict)
     indicators: Dict[str, Any] = field(default_factory=dict)
     passed: bool = False
+    rejection_reason: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -28,7 +34,8 @@ class Screen1Result:
             "confidence_score": self.confidence_score,
             "key_levels": self.key_levels,
             "indicators": self.indicators,
-            "passed": self.passed
+            "passed": self.passed,
+            "rejection_reason": self.rejection_reason
         }
 
 
@@ -118,6 +125,7 @@ class Screen1TrendAnalyzer:
             logger.info(f"Анализ D1 данных: {len(d1_klines)} свечей, текущая цена: {current_close:.2f}")
 
             # Рассчитываем индикаторы
+            ema_20 = self._calculate_ema(close_prices, 20)
             ema_50 = self._calculate_ema(close_prices, 50)
             ema_100 = self._calculate_ema(close_prices, 100)
             macd_data = self._calculate_macd(close_prices)
@@ -129,12 +137,12 @@ class Screen1TrendAnalyzer:
                 result.rejection_reason = reason
                 return result
 
+            current_ema_20 = ema_20[-1] if len(ema_20) > 0 else 0
             current_ema_50 = ema_50[-1] if len(ema_50) > 0 else 0
             current_ema_100 = ema_100[-1] if len(ema_100) > 0 else 0
 
-            logger.info(f"Индикаторы D1: EMA50={current_ema_50:.2f}, "
-                        f"EMA100={current_ema_100:.2f}, "
-                        f"ADX={adx_data.get('adx', 0):.1f}")
+            logger.info(f"Индикаторы D1: EMA20={current_ema_20:.2f}, EMA50={current_ema_50:.2f}, "
+                        f"EMA100={current_ema_100:.2f}, ADX={adx_data.get('adx', 0):.1f}")
 
             # Анализ тренда
             trend_info = self._determine_trend_direction(
@@ -148,9 +156,12 @@ class Screen1TrendAnalyzer:
             result.confidence_score = trend_info['confidence']
             result.key_levels = self._find_key_levels(high_prices, low_prices)
             result.indicators = trend_info['indicators']
+
+            # Добавляем EMA20 в indicators
+            result.indicators['ema_20'] = round(current_ema_20, 2)
+
             result.passed = self._check_screen1_passed(trend_info)
 
-            # ✅ ДОБАВЛЕНО: логирование причины отказа для ЭКРАН 1
             if not result.passed:
                 reason = f"{result.trend_direction} {result.trend_strength} (уверенность: {result.confidence_score:.1%}, ADX: {adx_data.get('adx', 0):.1f})"
                 logger.info(f"❌ {symbol}: ЭКРАН 1 не пройден — {reason}")

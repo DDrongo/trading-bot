@@ -58,6 +58,9 @@ class EventType(Enum):
     MARKET_DATA_UPDATED = "MARKET_DATA_UPDATED"
     ORDER_BOOK_UPDATED = "ORDER_BOOK_UPDATED"
 
+    # Добавлено на этапе отключения экранов 2 и 3, концентрация на первом экране определения тренда
+    TREND_ANALYZED = "trend_analyzed"
+
 
 @dataclass
 class Event:
