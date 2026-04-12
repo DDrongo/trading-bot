@@ -1,0 +1,105 @@
+# analyzer/config/logging_config.yaml
+# Конфигурация логирования для trading-bot
+
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  # Для консоли - минималистичный
+  console:
+    format: '%(asctime)s | %(levelname)-8s | %(message)s'
+    datefmt: '%H:%M:%S'
+
+  # Для файла - полный
+  detailed:
+    format: '%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+
+filters:
+  # Фильтр для консоли - только важные сообщения
+  console_filter:
+    (): analyzer.utils.logging_filters.ConsoleFilter
+
+handlers:
+  # Консольный вывод
+  console:
+    class: logging.StreamHandler
+    level: INFO
+    formatter: console
+    stream: ext://sys.stdout
+    filters: [console_filter]
+
+  # Файл с полными логами
+  file_detailed:
+    class: logging.handlers.TimedRotatingFileHandler
+    level: DEBUG
+    formatter: detailed
+    filename: logs/trading_bot.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+
+  # Отдельный файл для ошибок
+  file_errors:
+    class: logging.handlers.TimedRotatingFileHandler
+    level: WARNING
+    formatter: detailed
+    filename: logs/errors.log
+    when: midnight
+    interval: 1
+    backupCount: 30
+    encoding: utf-8
+
+loggers:
+  # API клиент - только ошибки в консоль
+  api_client_bybit:
+    level: DEBUG
+    handlers: [console, file_detailed, file_errors]
+    propagate: false
+
+  # DataProvider - только важное
+  data_provider:
+    level: INFO
+    handlers: [console, file_detailed, file_errors]
+    propagate: false
+
+  # Префильтр ликвидности - WARNING+ в консоль
+  liquidity_prefilter:
+    level: DEBUG
+    handlers: [console, file_detailed, file_errors]
+    propagate: false
+
+  # Screen1 - только прохождение/непрохождение
+  screen1_analyzer:
+    level: DEBUG
+    handlers: [console, file_detailed, file_errors]
+    propagate: false
+
+  # LightTrader - все сигналы в консоль
+  light_trader:
+    level: INFO
+    handlers: [console, file_detailed, file_errors]
+    propagate: false
+
+  # Оркестратор
+  orchestrator:
+    level: INFO
+    handlers: [console, file_detailed, file_errors]
+    propagate: false
+
+  # Position Manager
+  position_manager:
+    level: INFO
+    handlers: [console, file_detailed, file_errors]
+    propagate: false
+
+  # Signal Repository
+  signal_repository:
+    level: INFO
+    handlers: [console, file_detailed, file_errors]
+    propagate: false
+
+root:
+  level: DEBUG
+  handlers: [console, file_detailed, file_errors]

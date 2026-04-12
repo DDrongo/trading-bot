@@ -222,7 +222,7 @@ class LiquidityPrefilter:
 
             if not ticker:
                 metrics.fail_reason = "Не удалось получить тикер"
-                logger.warning(f"❌ Нет тикера для {symbol}")
+                logger.debug(f"❌ Нет тикера для {symbol}")
                 return metrics
 
             # 2. Извлекаем данные
@@ -241,7 +241,7 @@ class LiquidityPrefilter:
                     metrics.volume_24h_usd = volume * last_price
                     metrics.current_price = last_price
                     metrics.fail_reason = f"Цена ${last_price:.4f} < ${self.MIN_PRICE_THRESHOLD:.2f}"
-                    logger.warning(f"❌ {symbol}: цена слишком низкая: ${last_price:.4f}")
+                    logger.debug(f"❌ {symbol}: цена слишком низкая: ${last_price:.4f}")
                     return metrics
 
                 # Рассчитываем объем в USD
@@ -259,12 +259,12 @@ class LiquidityPrefilter:
             # 3. Быстрые проверки порогов
             if volume_usd < self.MIN_24H_VOLUME_USD:
                 metrics.fail_reason = f"Объём ${volume_usd:,.0f} < ${self.MIN_24H_VOLUME_USD:,.0f}"
-                logger.warning(f"❌ {symbol}: недостаточный объем: ${volume_usd:,.0f}")
+                logger.debug(f"❌ {symbol}: недостаточный объем: ${volume_usd:,.0f}")
                 return metrics
 
             if last_price < self.MIN_PRICE:
                 metrics.fail_reason = f"Цена ${last_price:.4f} < ${self.MIN_PRICE:.2f}"
-                logger.warning(f"❌ {symbol}: цена ниже минимума: ${last_price:.4f}")
+                logger.debug(f"❌ {symbol}: цена ниже минимума: ${last_price:.4f}")
                 return metrics
 
             # 4. Опционально: проверяем стакан (если включено в конфиге)
@@ -292,18 +292,18 @@ class LiquidityPrefilter:
 
                         if spread_pct > self.MAX_SPREAD_PCT:
                             metrics.fail_reason = f"Спред {spread_pct:.2f}% > {self.MAX_SPREAD_PCT}%"
-                            logger.warning(f"❌ {symbol}: слишком большой спред: {spread_pct:.2f}%")
+                            logger.debug(f"❌ {symbol}: слишком большой спред: {spread_pct:.2f}%")
                             return metrics
 
                         if avg_depth < self.MIN_ORDERBOOK_DEPTH:
                             metrics.fail_reason = f"Глубина стакана ${avg_depth:,.0f} < ${self.MIN_ORDERBOOK_DEPTH:,.0f}"
-                            logger.warning(f"❌ {symbol}: недостаточная глубина: ${avg_depth:,.0f}")
+                            logger.debug(f"❌ {symbol}: недостаточная глубина: ${avg_depth:,.0f}")
                             return metrics
                     else:
-                        logger.warning(f"⚠️ {symbol}: пустой или некорректный стакан")
+                        logger.debug(f"⚠️ {symbol}: пустой или некорректный стакан")
 
                 except Exception as e:
-                    logger.warning(f"⚠️ Не удалось проверить стакан для {symbol}: {e}")
+                    logger.debug(f"⚠️ Не удалось проверить стакан для {symbol}: {e}")
                     # Не считаем это критической ошибкой для быстрой фильтрации
 
             # 5. Дополнительные проверки (если есть данные)

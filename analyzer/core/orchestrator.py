@@ -1,11 +1,19 @@
-# analyzer/core/orchestrator.py (ПОЛНОСТЬЮ - ФАЗА 1.3.8)
+# analyzer/core/orchestrator.py (ОБНОВЛЁННАЯ ВЕРСИЯ - ФАЗА 1.5.1)
 """
 🎯 ОРКЕСТРАТОР - главный координатор всей системы анализа
+
 ФАЗА 1.3.8:
 - Исправлена обработка исключений
 - Добавлена точка входа
 - ИСПРАВЛЕНО: WATCH резервирование (передача параметров)
 - ИСПРАВЛЕНО: единое время через time_utils
+
+ФАЗА 1.5.0:
+- Добавлена поддержка режима Light (trading_mode: light)
+- Ветвление между LightTrader и ThreeScreenAnalyzer
+
+ФАЗА 1.5.1:
+- Добавлено кэширование списка ликвидных монет (TTL = 1 час)
 """
 
 import asyncio
@@ -76,8 +84,22 @@ class AnalysisOrchestrator:
             'M15': self.m15_config.get('expiration_hours', 3)
         }
 
+        # ========== ФАЗА 1.5.0: ВЫБОР РЕЖИМА ТОРГОВЛИ ==========
+        self.trading_mode = self.config.get('trading_mode', 'pro')
+        logger.info(f"🎯 Режим торговли: {self.trading_mode.upper()}")
+
         self.prefilter = LiquidityPrefilter(self.data_provider, self.config)
+
+        # Pro режим (ThreeScreenAnalyzer)
         self.three_screen_analyzer = ThreeScreenAnalyzer(self.config, self.data_provider)
+
+        # Light режим (LightTrader)
+        if self.trading_mode == 'light':
+            from .light_trader import LightTrader
+            self.light_trader = LightTrader(self.config, self.data_provider)
+            logger.info("✅ LightTrader инициализирован")
+        else:
+            self.light_trader = None
 
         self.websocket: Optional[BybitWebSocketClient] = None
 
@@ -90,13 +112,22 @@ class AnalysisOrchestrator:
         self._duplicates_skipped = 0
         self._rejected_signals = 0
 
-        logger.info("✅ AnalysisOrchestrator создан (Фаза 1.3.8)")
-        logger.info(f"   Проверка дубликатов: WATCH={self.duplicate_check_hours['WATCH']}ч, M15={self.duplicate_check_hours['M15']}ч")
+        # ========== ФАЗА 1.5.1: КЭШИРОВАНИЕ ЛИКВИДНЫХ МОНЕТ ==========
+        self._liquid_symbols_cache: List[str] = []
+        self._liquid_symbols_cache_time: Optional[datetime] = None
+        self._liquid_symbols_cache_ttl = 3600  # 1 час
+
+        logger.info("✅ AnalysisOrchestrator создан (Фаза 1.5.1)")
+        logger.info(
+            f"   Проверка дубликатов: WATCH={self.duplicate_check_hours['WATCH']}ч, M15={self.duplicate_check_hours['M15']}ч")
+        logger.info(f"   Режим торговли: {self.trading_mode.upper()}")
+        logger.info(f"   Кэш ликвидных монет: TTL={self._liquid_symbols_cache_ttl} сек")
 
     async def initialize(self) -> bool:
         logger.info("🚀 Инициализация оркестратора")
 
         try:
+            # Инициализируем Pro анализатор (всегда нужен для трендов)
             three_screen_init = await self.three_screen_analyzer.initialize()
             if not three_screen_init:
                 logger.error("❌ Не удалось инициализировать ThreeScreenAnalyzer")
@@ -114,6 +145,38 @@ class AnalysisOrchestrator:
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации: {e}")
             return False
+
+    async def _get_liquid_symbols(self, all_symbols: List[str]) -> List[str]:
+        """
+        Получить ликвидные символы с кэшированием
+
+        ФАЗА 1.5.1: Кэширование на 1 час для снижения нагрузки на API
+        """
+        current_time = datetime.now()
+
+        # Проверяем кэш
+        if (self._liquid_symbols_cache_time and
+                (current_time - self._liquid_symbols_cache_time).total_seconds() < self._liquid_symbols_cache_ttl):
+            logger.debug(f"♻️ Используем кэш ликвидных символов: {len(self._liquid_symbols_cache)} шт")
+            return self._liquid_symbols_cache.copy()
+
+        # Кэш устарел или пуст — обновляем
+        logger.info("🔄 Обновление списка ликвидных символов...")
+
+        usdt_symbols = [s for s in all_symbols if s.endswith("USDT")]
+
+        max_symbols_per_cycle = self.config.get('analysis', {}).get('max_symbols_per_cycle', 50)
+        symbols_to_check = usdt_symbols[:max_symbols_per_cycle]
+
+        prefilter_result = await self.prefilter.filter_symbols(symbols_to_check)
+
+        self._liquid_symbols_cache = prefilter_result.filtered_symbols
+        self._liquid_symbols_cache_time = current_time
+
+        logger.info(
+            f"✅ Ликвидных символов: {len(self._liquid_symbols_cache)} (обновлено, TTL={self._liquid_symbols_cache_ttl} сек)")
+
+        return self._liquid_symbols_cache.copy()
 
     def create_session(self, symbols: List[str]) -> AnalysisSession:
         session_id = f"session_{now().strftime('%Y%m%d_%H%M%S')}"
@@ -157,7 +220,7 @@ class AnalysisOrchestrator:
 
     async def analyze_symbols_batch(self, symbols: List[str], max_concurrent: int = None) -> Dict[
         str, ThreeScreenAnalysis]:
-        logger.info(f"🚀 Начинаем анализ пачки из {len(symbols)} символов")
+        logger.info(f"🚀 Начинаем анализ пачки из {len(symbols)} символов (режим: {self.trading_mode.upper()})")
 
         if max_concurrent is None:
             max_concurrent = self.orchestration_config.get('max_concurrent_analysis', 5)
@@ -165,34 +228,43 @@ class AnalysisOrchestrator:
         session = self.create_session(symbols)
 
         try:
-            logger.info("🔍 ШАГ 1: Префильтрация по ликвидности...")
-            prefilter_result = await self.prefilter.filter_symbols(symbols)
-            session.prefilter_result = prefilter_result
+            # В Light режиме используем кэшированные ликвидные символы
+            if self.trading_mode == 'light':
+                filtered_symbols = symbols  # Уже отфильтрованы через _get_liquid_symbols
+                logger.info(f"📊 Light режим: анализируем {len(filtered_symbols)} ликвидных символов")
+            else:
+                logger.info("🔍 ШАГ 1: Префильтрация по ликвидности...")
+                prefilter_result = await self.prefilter.filter_symbols(symbols)
+                session.prefilter_result = prefilter_result
 
-            if not prefilter_result.filtered_symbols:
-                logger.warning("❌ Префильтр не пропустил ни одного символа")
-                session.status = "completed"
-                session.end_time = now()
-                return {}
+                if not prefilter_result.filtered_symbols:
+                    logger.warning("❌ Префильтр не пропустил ни одного символа")
+                    session.status = "completed"
+                    session.end_time = now()
+                    return {}
 
-            filtered_symbols = prefilter_result.filtered_symbols
-            logger.info(f"✅ Префильтр: {len(symbols)} → {len(filtered_symbols)} символов")
+                filtered_symbols = prefilter_result.filtered_symbols
+                logger.info(f"✅ Префильтр: {len(symbols)} → {len(filtered_symbols)} символов")
 
-            logger.info("🔍 ШАГ 1.5: Проверка активных WATCH дубликатов...")
+            # ========== В LIGHT РЕЖИМЕ ПРОПУСКАЕМ ПРОВЕРКУ WATCH ДУБЛИКАТОВ ==========
+            if self.trading_mode == 'light':
+                symbols_to_analyze = filtered_symbols
+                duplicate_skipped_symbols = []
+                logger.debug(f"📊 Light режим: анализируем все {len(symbols_to_analyze)} символов")
+            else:
+                logger.info("🔍 ШАГ 1.5: Проверка активных WATCH дубликатов...")
+                symbols_to_analyze = []
+                duplicate_skipped_symbols = []
 
-            symbols_to_analyze = []
-            duplicate_skipped_symbols = []
+                for symbol in filtered_symbols:
+                    if await self._check_duplicate_before_analysis(symbol, 'WATCH'):
+                        duplicate_skipped_symbols.append(symbol)
+                    else:
+                        symbols_to_analyze.append(symbol)
 
-            for symbol in filtered_symbols:
-                if await self._check_duplicate_before_analysis(symbol, 'WATCH'):
-                    duplicate_skipped_symbols.append(symbol)
-                else:
-                    symbols_to_analyze.append(symbol)
-
-            session.duplicates_skipped = len(duplicate_skipped_symbols)
-            self._duplicates_skipped += len(duplicate_skipped_symbols)
-
-            logger.info(f"✅ Проверка дубликатов: {len(filtered_symbols)} → {len(symbols_to_analyze)} символов")
+                session.duplicates_skipped = len(duplicate_skipped_symbols)
+                self._duplicates_skipped += len(duplicate_skipped_symbols)
+                logger.info(f"✅ Проверка дубликатов: {len(filtered_symbols)} → {len(symbols_to_analyze)} символов")
 
             if not symbols_to_analyze:
                 logger.info("❌ Нет символов для анализа после проверки дубликатов")
@@ -200,7 +272,8 @@ class AnalysisOrchestrator:
                 session.end_time = now()
                 return {}
 
-            logger.info(f"📊 ШАГ 2: Запускаем трёхэкранный анализ для {len(symbols_to_analyze)} символов...")
+            logger.info(
+                f"📊 ШАГ 2: Запускаем анализ для {len(symbols_to_analyze)} символов (режим: {self.trading_mode.upper()})...")
 
             semaphore = asyncio.Semaphore(max_concurrent)
             results = {}
@@ -229,49 +302,50 @@ class AnalysisOrchestrator:
                 results[symbol] = result
                 session.analysis_results[symbol] = result
 
-                if result.screen2 and result.screen2.passed:
-                    screen2_score = getattr(result.screen2, 'screen2_score', 0)
-                    if screen2_score >= 4:
-                        current_price = result.screen3.entry_price if result.screen3 else 0
-                        if current_price == 0:
-                            current_price = await self.data_provider.get_current_price(symbol)
+                # ========== В LIGHT РЕЖИМЕ НЕТ WATCH СИГНАЛОВ ==========
+                if self.trading_mode != 'light':
+                    if result.screen2 and result.screen2.passed:
+                        screen2_score = getattr(result.screen2, 'screen2_score', 0)
+                        if screen2_score >= 4:
+                            current_price = result.screen3.entry_price if result.screen3 else 0
+                            if current_price == 0:
+                                current_price = await self.data_provider.get_current_price(symbol)
 
-                        pos_config = self.config.get('position_management', {})
-                        risk_per_trade_pct = pos_config.get('position_sizing', {}).get('risk_per_trade_pct', 2.0)
-                        leverage = self.config.get('paper_trading', {}).get('leverage', 10)
-                        balance = 10000.0
+                            pos_config = self.config.get('position_management', {})
+                            risk_per_trade_pct = pos_config.get('position_sizing', {}).get('risk_per_trade_pct', 2.0)
+                            leverage = self.config.get('paper_trading', {}).get('leverage', 10)
+                            balance = 10000.0
 
-                        margin_target = balance * (risk_per_trade_pct / 100.0)
-                        position_value = margin_target * leverage
-                        position_size = position_value / current_price if current_price > 0 else 0.001
-                        position_size = max(0.001, min(1000000.0, position_size))
+                            margin_target = balance * (risk_per_trade_pct / 100.0)
+                            position_value = margin_target * leverage
+                            position_size = position_value / current_price if current_price > 0 else 0.001
+                            position_size = max(0.001, min(1000000.0, position_size))
 
-                        # ⬇️⬇️⬇ ИЗМЕНЕНИЕ: передаём current_price ⬇️⬇️⬇️
-                        signal_id = await signal_repository.save_watch_signal(
-                            symbol=symbol,
-                            direction="BUY" if result.screen1.trend_direction == "BULL" else "SELL",
-                            zone_low=result.screen2.zone_low,
-                            zone_high=result.screen2.zone_high,
-                            screen2_score=screen2_score,
-                            expected_pattern=result.screen2.expected_pattern,
-                            expiration_hours=self.watch_config.get('expiration_hours', 3),
-                            position_size=position_size,
-                            entry_price=current_price,
-                            leverage=leverage,
-                            current_price=current_price  # ← НОВЫЙ ПАРАМЕТР
-                        )
-                        if signal_id:
-                            session.watch_signals += 1
-                            self._total_watch += 1
-                            logger.info(f"👀 WATCH сигнал для {symbol} сохранён (score={screen2_score})")
+                            signal_id = await signal_repository.save_watch_signal(
+                                symbol=symbol,
+                                direction="BUY" if result.screen1.trend_direction == "BULL" else "SELL",
+                                zone_low=result.screen2.zone_low,
+                                zone_high=result.screen2.zone_high,
+                                screen2_score=screen2_score,
+                                expected_pattern=result.screen2.expected_pattern,
+                                expiration_hours=self.watch_config.get('expiration_hours', 3),
+                                position_size=position_size,
+                                entry_price=current_price,
+                                leverage=leverage,
+                                current_price=current_price
+                            )
+                            if signal_id:
+                                session.watch_signals += 1
+                                self._total_watch += 1
+                                logger.info(f"👀 WATCH сигнал для {symbol} сохранён (score={screen2_score})")
 
-                            if self.websocket:
-                                self.websocket.add_symbols([symbol])
+                                if self.websocket:
+                                    self.websocket.add_symbols([symbol])
 
                 if result.should_trade and result.screen3 and result.screen3.passed:
                     session.signals_found += 1
                     self._total_signals += 1
-                    logger.info(f"✅ M15 сигнал для {symbol} найден")
+                    logger.info(f"✅ Сигнал для {symbol} найден")
 
             session.analyzed_symbols = len(results)
             session.status = "completed"
@@ -281,7 +355,7 @@ class AnalysisOrchestrator:
             logger.info(f"🎯 АНАЛИЗ ЗАВЕРШЕН: "
                         f"Проанализировано: {session.analyzed_symbols}/{len(symbols_to_analyze)} "
                         f"WATCH сигналов: {session.watch_signals} "
-                        f"M15 сигналов: {session.signals_found} "
+                        f"Сигналов: {session.signals_found} "
                         f"Время: {(session.end_time - session.start_time).total_seconds():.1f} сек")
 
             asyncio.create_task(event_bus.publish(EventType.SESSION_COMPLETED, {
@@ -291,7 +365,8 @@ class AnalysisOrchestrator:
                 "watch_signals": session.watch_signals,
                 "signals_found": session.signals_found,
                 "duplicates_skipped": session.duplicates_skipped,
-                "execution_time_seconds": (session.end_time - session.start_time).total_seconds()
+                "execution_time_seconds": (session.end_time - session.start_time).total_seconds(),
+                "trading_mode": self.trading_mode
             }, source="orchestrator"))
 
             return results
@@ -310,10 +385,21 @@ class AnalysisOrchestrator:
             return {}
 
     async def _analyze_single_symbol(self, symbol: str, session: AnalysisSession) -> Optional[ThreeScreenAnalysis]:
-        logger.debug(f"🔍 Анализ символа {symbol}")
+        """
+        Анализ одного символа с выбором режима (Light или Pro)
+
+        ФАЗА 1.5.0: Добавлено ветвление между LightTrader и ThreeScreenAnalyzer
+        """
+        logger.debug(f"🔍 Анализ символа {symbol} (режим: {self.trading_mode.upper()})")
 
         try:
-            analysis = await self.three_screen_analyzer.analyze_symbol(symbol)
+            # ========== ВЫБОР РЕЖИМА АНАЛИЗА ==========
+            if self.trading_mode == 'light' and self.light_trader:
+                # Light режим
+                analysis = await self.light_trader.analyze_symbol(symbol)
+            else:
+                # Pro режим (ThreeScreenAnalyzer)
+                analysis = await self.three_screen_analyzer.analyze_symbol(symbol)
 
             if not analysis:
                 logger.debug(f"❌ {symbol}: анализ не удался")
@@ -321,9 +407,9 @@ class AnalysisOrchestrator:
 
             if analysis.should_trade and analysis.screen3 and analysis.screen3.passed:
                 rr = analysis.screen3.indicators.get('risk_reward_ratio', 0)
-                logger.info(f"✅ {symbol}: M15 СИГНАЛ НАЙДЕН! "
+                logger.info(f"✅ {symbol}: СИГНАЛ НАЙДЕН! "
                             f"{analysis.screen3.signal_type} @ {analysis.screen3.entry_price:.2f} "
-                            f"(R/R: {rr:.2f}:1, паттерн: {analysis.screen3.trigger_pattern})")
+                            f"(R/R: {rr:.2f}:1, паттерн: {analysis.screen3.trigger_pattern}, режим: {self.trading_mode.upper()})")
             elif analysis.screen2 and analysis.screen2.passed:
                 score = getattr(analysis.screen2, 'screen2_score', 0)
                 logger.info(
@@ -339,7 +425,7 @@ class AnalysisOrchestrator:
             return None
 
     async def analyze_single_symbol(self, symbol: str) -> Optional[ThreeScreenAnalysis]:
-        logger.info(f"🔍 Анализ одиночного символа: {symbol}")
+        logger.info(f"🔍 Анализ одиночного символа: {symbol} (режим: {self.trading_mode.upper()})")
 
         liquidity_ok = await self.prefilter.quick_check(symbol)
         if not liquidity_ok:
@@ -475,6 +561,7 @@ class AnalysisOrchestrator:
     def get_stats(self) -> Dict[str, Any]:
         ws_stats = self.websocket.get_stats() if self.websocket else {}
         return {
+            "trading_mode": self.trading_mode,
             "total_sessions": len(self._sessions),
             "total_analyses": self._total_analyses,
             "total_watch": self._total_watch,
@@ -484,10 +571,13 @@ class AnalysisOrchestrator:
             "success_rate": (self._total_signals / self._total_analyses * 100) if self._total_analyses > 0 else 0,
             "current_session": self._current_session.session_id if self._current_session else None,
             "prefilter_cache_stats": self.prefilter.get_cache_stats(),
-            "websocket_stats": ws_stats
+            "websocket_stats": ws_stats,
+            "liquid_symbols_cache_size": len(self._liquid_symbols_cache),
+            "liquid_symbols_cache_ttl": self._liquid_symbols_cache_ttl
         }
 
-    async def run_continuous_analysis(self, symbols: List[str], interval_minutes: int = None, max_concurrent: int = None):
+    async def run_continuous_analysis(self, symbols: List[str], interval_minutes: int = None,
+                                      max_concurrent: int = None):
         if interval_minutes is None:
             interval_minutes = self.orchestration_config.get('continuous_analysis_interval', 15)
         if max_concurrent is None:
@@ -495,7 +585,8 @@ class AnalysisOrchestrator:
 
         min_wait_seconds = self.caching_config.get('min_wait_seconds', 1)
 
-        logger.info(f"🔄 Запуск непрерывного анализа {len(symbols)} символов каждые {interval_minutes} минут")
+        logger.info(
+            f"🔄 Запуск непрерывного анализа {len(symbols)} символов каждые {interval_minutes} минут (режим: {self.trading_mode.upper()})")
 
         try:
             while True:
@@ -507,9 +598,10 @@ class AnalysisOrchestrator:
                 results = await self.analyze_symbols_batch(symbols, max_concurrent)
 
                 signals = [s for s, a in results.items() if a and a.should_trade]
-                watch = [s for s, a in results.items() if a and a.screen2 and a.screen2.passed and getattr(a.screen2, 'screen2_score', 0) >= 4]
+                watch = [s for s, a in results.items() if
+                         a and a.screen2 and a.screen2.passed and getattr(a.screen2, 'screen2_score', 0) >= 4]
 
-                logger.info(f"🔄 Итерация {iteration_id} завершена: WATCH: {len(watch)}, M15: {len(signals)}")
+                logger.info(f"🔄 Итерация {iteration_id} завершена: WATCH: {len(watch)}, Сигналов: {len(signals)}")
 
                 iteration_duration = (now() - iteration_start).total_seconds()
                 wait_time = max(0, interval_minutes * 60 - iteration_duration)
@@ -532,6 +624,8 @@ class AnalysisOrchestrator:
         if self.websocket:
             await self.websocket.close()
         self.prefilter.clear_cache()
+        self._liquid_symbols_cache.clear()
+        self._liquid_symbols_cache_time = None
         self._current_session = None
         self._duplicates_skipped = 0
         self._rejected_signals = 0
@@ -548,16 +642,18 @@ if __name__ == "__main__":
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
+
     async def main():
         orchestrator = AnalysisOrchestrator(config)
         if not await orchestrator.initialize():
             print("❌ Не удалось инициализировать оркестратор")
             return
         symbols = config.get('analysis', {}).get('symbols', ['BTCUSDT', 'ETHUSDT'])
-        print(f"🚀 Запуск анализа для {len(symbols)} символов...")
+        print(f"🚀 Запуск анализа для {len(symbols)} символов в режиме {orchestrator.trading_mode.upper()}...")
         results = await orchestrator.analyze_symbols_batch(symbols[:5])
         print(f"\n✅ Анализ завершён. Найдено сигналов: {len([r for r in results.values() if r.should_trade])}")
         await orchestrator.cleanup()
+
 
     asyncio.run(main())
 

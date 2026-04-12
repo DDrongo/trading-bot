@@ -6,6 +6,9 @@ HOTFIX 1.3.6.2:
 - Исправлен импорт Screen2Analyzer (был Screen2EntryZonesAnalyzer)
 - Screen2Result импортируется из data_classes
 - Добавлен алиас для обратной совместимости
+
+ФАЗА 1.5.0:
+- Добавлен экспорт LightTrader
 """
 
 # Экспортируем все основные классы для удобного импорта
@@ -27,6 +30,9 @@ from .screen3_signal_generator import Screen3SignalGenerator, Screen3Result, Pat
 from .signal_repository import SignalRepository, signal_repository
 from .three_screen_analyzer import ThreeScreenAnalyzer
 from .orchestrator import AnalysisOrchestrator, AnalysisSession
+
+# ФАЗА 1.5.0: Light режим
+from .light_trader import LightTrader
 
 # ✅ ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ
 # Если какой-то код использует старое имя Screen2EntryZonesAnalyzer
@@ -60,13 +66,16 @@ __all__ = [
     'PrefilterResult',
     'LiquidityMetrics',
     'Screen1TrendAnalyzer',
-    'Screen2Analyzer',           # ← новое имя (правильное)
-    'Screen2EntryZonesAnalyzer', # ← оставлено для обратной совместимости
+    'Screen2Analyzer',  # ← новое имя (правильное)
+    'Screen2EntryZonesAnalyzer',  # ← оставлено для обратной совместимости
     'Screen3SignalGenerator',
     'PatternType',
     'SignalRepository',
     'signal_repository',
     'ThreeScreenAnalyzer',
     'AnalysisOrchestrator',
-    'AnalysisSession'
+    'AnalysisSession',
+
+    # ФАЗА 1.5.0: Light режим
+    'LightTrader',
 ]

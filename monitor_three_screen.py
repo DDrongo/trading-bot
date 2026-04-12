@@ -695,6 +695,12 @@ class ThreeScreenMonitor:
                 self.clear_screen()
                 self.print_header("THREE SCREEN ANALYZER - РЕАЛТАЙМ МОНИТОР (v1.3.10)")
 
+                # ========== ФАЗА 1.5.0: ОТОБРАЖЕНИЕ РЕЖИМА ТОРГОВЛИ ==========
+                trading_mode = self.config.get('trading_mode', 'pro')
+                mode_color = Fore.GREEN if trading_mode == 'light' else Fore.CYAN
+                print(f"{mode_color}🎯 Режим торговли: {trading_mode.upper()}{Style.RESET_ALL}")
+                print()
+
                 if not self.signal_repo:
                     print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
                     break
@@ -1308,6 +1314,11 @@ class ThreeScreenMonitor:
         while True:
             self.clear_screen()
             self.print_header("THREE SCREEN ANALYZER - МОНИТОР СИГНАЛОВ (v1.3.10)")
+
+            # ========== ФАЗА 1.5.0: ОТОБРАЖЕНИЕ РЕЖИМА ТОРГОВЛИ ==========
+            trading_mode = self.config.get('trading_mode', 'pro')
+            mode_color = Fore.GREEN if trading_mode == 'light' else Fore.CYAN
+            print(f"{mode_color}🎯 Режим торговли: {trading_mode.upper()}{Style.RESET_ALL}")
 
             account_state = await self.get_account_state()
 

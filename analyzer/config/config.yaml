@@ -219,9 +219,9 @@ api:
   cache:
     ttl_seconds: 60
   exchange: bybit
-  rate_limit: 10
+  rate_limit: 20
   recv_window: 5000
-  request_delay: 0.3
+  request_delay: 0.2
   max_concurrent_requests: 5
   requests:
     default_order_type: GTC
@@ -452,3 +452,23 @@ display:
   table_style: unicode
   colors_enabled: true
   max_symbols_per_page: 50
+
+# ----------------------------------------------------------------------------
+# НАСТРОЙКИ РЕЖИМОВ ТОРГОВЛИ (ФАЗА 1.5.0)
+# ----------------------------------------------------------------------------
+# trading_mode: "pro"   # Полный трёхэкранный анализ (в разработке, фаза 1.4.x)
+trading_mode: "light"   # Упрощённый режим на EMA и откатах (фаза 1.5.0)
+
+# Настройки для УПРОЩЁННОГО РЕЖИМА (Light)
+light_trader:
+  enabled: true
+  # Параметры тренда D1
+  d1_ema_fast: 20
+  d1_ema_slow: 50
+  # Параметры отката H4
+  h4_ema: 20
+  zone_proximity_pct: 0.5      # 0.5% отклонения от EMA20
+  # Параметры входа
+  risk_reward_ratio: 2.0
+  min_patterns: ["ENGULFING", "PIN_BAR", "MORNING_STAR"]
+  expiration_hours: 3
