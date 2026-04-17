@@ -1,14 +1,20 @@
-# analyzer/core/signal_repository.py (ПОЛНОСТЬЮ - ФАЗА 1.3.10)
+# analyzer/core/signal_repository.py (ПОЛНОСТЬЮ - ФАЗА 1.5.2)
 """
 📊 SIGNAL REPOSITORY - Репозиторий для работы с сигналами
 ФАЗА 1.3.9.2:
 - Добавлен метод save_signal() для M15 сигналов
 - Добавлены поля current_price_at_signal и position_vs_zone
-- Сохранение цены на момент создания WATCH и M15 сигналов
 
 ФАЗА 1.3.10:
 - Добавлена таблица trend_analysis
-- Добавлены методы save_trend_analysis(), get_trend_analysis(), get_latest_trends()
+
+ФАЗА 1.4.0:
+- Добавлено поле learning_comment для обучающих комментариев
+
+ФАЗА 1.5.2:
+- 🆕 Добавлен параметр learning_comment в save_watch_signal()
+- 🆕 WATCH-сигналы теперь сохраняются с обучающим комментарием
+- 🔧 ИСПРАВЛЕНО: save_trend_analysis теперь проверяет, изменился ли тренд
 """
 
 import aiosqlite
@@ -81,7 +87,8 @@ class SignalRepository:
                             position_value REAL,
                             reserved_margin REAL,
                             current_price_at_signal REAL,
-                            position_vs_zone TEXT
+                            position_vs_zone TEXT,
+                            learning_comment TEXT
                         )
                     """)
                     logger.info("✅ Таблица signals создана")
@@ -95,7 +102,7 @@ class SignalRepository:
                         'order_type', 'fill_price', 'position_size', 'rejection_reason',
                         'zone_low', 'zone_high', 'expected_pattern', 'screen2_score',
                         'updated_time', 'leverage', 'margin', 'position_value', 'reserved_margin',
-                        'current_price_at_signal', 'position_vs_zone'
+                        'current_price_at_signal', 'position_vs_zone', 'learning_comment'
                     ]
 
                     for field in fields_to_add:
@@ -143,7 +150,6 @@ class SignalRepository:
                             await conn.execute(f"ALTER TABLE trades ADD COLUMN {field} REAL")
                             logger.info(f"✅ Добавлено поле {field}")
 
-                # Фаза 1.3.10: Создание таблицы trend_analysis
                 cursor = await conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='trend_analysis'")
                 trend_table_exists = await cursor.fetchone()
@@ -187,6 +193,39 @@ class SignalRepository:
 
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации БД: {e}")
+            return False
+
+    async def was_traded_recently(self, symbol: str, minutes: int = 30) -> bool:
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM trades 
+                    WHERE symbol = ? 
+                    AND status = 'CLOSED'
+                    AND closed_at > datetime('now', ?)
+                """, (symbol, f'-{minutes} minutes'))
+                row = await cursor.fetchone()
+                return row[0] > 0 if row else False
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки недавних сделок: {e}")
+            return False
+
+    async def get_active_or_recent_signals(self, symbol: str, minutes: int = 30) -> bool:
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM signals 
+                    WHERE symbol = ? 
+                    AND (
+                        status IN ('ACTIVE', 'WATCH')
+                        OR (status = 'CLOSED' AND closed_time > datetime('now', ?))
+                        OR (status = 'REJECTED' AND created_time > datetime('now', ?))
+                    )
+                """, (symbol, f'-{minutes} minutes', f'-{minutes} minutes'))
+                row = await cursor.fetchone()
+                return row[0] > 0 if row else False
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки сигналов: {e}")
             return False
 
     async def check_duplicate_signal(self, symbol: str, signal_subtype: str, expiration_hours: int = 24) -> bool:
@@ -248,7 +287,8 @@ class SignalRepository:
             position_size: float = None,
             entry_price: float = None,
             leverage: float = 10,
-            current_price: float = None
+            current_price: float = None,
+            learning_comment: str = None
     ) -> Optional[int]:
         try:
             expiration_time = utc_now() + timedelta(hours=expiration_hours)
@@ -261,8 +301,6 @@ class SignalRepository:
                     position_vs_zone = "BELOW"
                 else:
                     position_vs_zone = "INSIDE"
-                logger.info(
-                    f"📊 {symbol}: цена={current_price:.4f}, зона={zone_low:.4f}-{zone_high:.4f}, позиция={position_vs_zone}")
 
             async with aiosqlite.connect(self.db_path) as conn:
                 cursor = await conn.execute("""
@@ -279,12 +317,12 @@ class SignalRepository:
                             expected_pattern = ?, expiration_time = ?,
                             direction = ?, position_size = ?, entry_price = ?,
                             leverage = ?, current_price_at_signal = ?,
-                            position_vs_zone = ?, updated_time = CURRENT_TIMESTAMP
+                            position_vs_zone = ?, learning_comment = ?, updated_time = CURRENT_TIMESTAMP
                         WHERE id = ?
                     """, (zone_low, zone_high, screen2_score, expected_pattern,
                           expiration_time.isoformat(), direction, position_size,
                           entry_price, leverage, current_price or 0,
-                          position_vs_zone, existing[0]))
+                          position_vs_zone, learning_comment, existing[0]))
                     await conn.commit()
                     logger.info(f"🔄 Обновлён WATCH сигнал для {symbol}")
                     return existing[0]
@@ -294,17 +332,18 @@ class SignalRepository:
                             symbol, direction, signal_subtype, status,
                             zone_low, zone_high, screen2_score, expected_pattern,
                             expiration_time, position_size, entry_price, leverage,
-                            current_price_at_signal, position_vs_zone,
+                            current_price_at_signal, position_vs_zone, learning_comment,
                             created_time, updated_time
-                        ) VALUES (?, ?, 'WATCH', 'WATCH', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ) VALUES (?, ?, 'WATCH', 'WATCH', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     """, (symbol, direction, zone_low, zone_high, screen2_score,
                           expected_pattern, expiration_time.isoformat(),
                           position_size, entry_price, leverage,
-                          current_price or 0, position_vs_zone))
+                          current_price or 0, position_vs_zone, learning_comment))
                     await conn.commit()
                     signal_id = cursor.lastrowid
-                    logger.info(
-                        f"✅ Создан WATCH сигнал для {symbol} (ID={signal_id}, цена={current_price:.4f}, позиция={position_vs_zone})")
+                    logger.info(f"✅ Создан WATCH сигнал для {symbol} (ID={signal_id})")
+                    if learning_comment:
+                        logger.info(f"📚 WATCH комментарий сохранён ({len(learning_comment)} символов)")
 
                     await self.event_bus.publish(
                         EventType.WATCH_CREATED,
@@ -328,17 +367,7 @@ class SignalRepository:
             logger.error(f"❌ Ошибка сохранения WATCH сигнала {symbol}: {e}")
             return None
 
-    # ========== ФАЗА 1.3.9.2: МЕТОД ДЛЯ M15 СИГНАЛОВ ==========
-    async def save_signal(self, analysis) -> Optional[int]:
-        """
-        Сохраняет M15 сигнал в БД и публикует событие для Position Manager
-
-        Args:
-            analysis: ThreeScreenAnalysis с результатами анализа
-
-        Returns:
-            ID сигнала или None при ошибке
-        """
+    async def save_signal(self, analysis, learning_comment: str = None) -> Optional[int]:
         try:
             from analyzer.core.data_classes import ThreeScreenAnalysis
 
@@ -349,7 +378,6 @@ class SignalRepository:
 
             current_price = screen3.entry_price
 
-            # Рассчитываем позицию цены относительно зоны
             position_vs_zone = ""
             if analysis.zone_low > 0 and analysis.zone_high > 0:
                 if current_price > analysis.zone_high:
@@ -369,9 +397,9 @@ class SignalRepository:
                         trigger_pattern, confidence, risk_reward_ratio,
                         current_price_at_signal, position_vs_zone,
                         zone_low, zone_high, screen2_score, expected_pattern,
-                        expiration_time, order_type,
+                        expiration_time, order_type, learning_comment,
                         created_time, updated_time
-                    ) VALUES (?, ?, 'M15', 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MARKET', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, 'M15', 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MARKET', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """, (
                     analysis.symbol,
                     "BUY" if screen3.signal_type == "BUY" else "SELL",
@@ -387,32 +415,14 @@ class SignalRepository:
                     analysis.zone_high,
                     analysis.screen2_score,
                     analysis.expected_pattern,
-                    expiration_time.isoformat()
+                    expiration_time.isoformat(),
+                    learning_comment
                 ))
                 await conn.commit()
                 signal_id = cursor.lastrowid
-                logger.info(
-                    f"✅ M15 сигнал {analysis.symbol} сохранён (ID={signal_id}, цена={current_price:.4f}, R/R={screen3.indicators.get('risk_reward_ratio', 0):.2f})")
-
-                # Публикуем событие для Position Manager
-                await self.event_bus.publish(
-                    EventType.TRADING_SIGNAL_GENERATED,
-                    {
-                        'signal_id': signal_id,
-                        'symbol': analysis.symbol,
-                        'signal_type': screen3.signal_type,
-                        'entry_price': screen3.entry_price,
-                        'stop_loss': screen3.stop_loss,
-                        'take_profit': screen3.take_profit,
-                        'confidence': analysis.overall_confidence,
-                        'risk_reward_ratio': screen3.indicators.get('risk_reward_ratio', 0),
-                        'signal_subtype': 'M15',
-                        'order_type': 'MARKET',
-                        'expiration_time': expiration_time.isoformat(),
-                        'leverage': self.config.get('paper_trading', {}).get('leverage', 10) if self.config else 10
-                    },
-                    'signal_repository'
-                )
+                logger.info(f"✅ M15 сигнал {analysis.symbol} сохранён (ID={signal_id})")
+                if learning_comment:
+                    logger.info(f"📚 {learning_comment[:100]}...")
 
                 return signal_id
 
@@ -422,7 +432,6 @@ class SignalRepository:
             traceback.print_exc()
             return None
 
-    # ========== ФАЗА 1.3.10: МЕТОД ДЛЯ СОХРАНЕНИЯ ТРЕНДА ==========
     async def save_trend_analysis(
             self,
             symbol: str,
@@ -436,24 +445,65 @@ class SignalRepository:
             confidence: float
     ) -> Optional[int]:
         """
-        Сохраняет результат анализа тренда D1 в таблицу trend_analysis
-
-        Args:
-            symbol: Символ монеты (например, BTCUSDT)
-            trend_direction: BULL / BEAR / SIDEWAYS
-            adx: Значение ADX
-            ema20: Значение EMA20
-            ema50: Значение EMA50
-            macd_line: Значение линии MACD
-            macd_signal: Значение сигнальной линии MACD
-            structure: HH/HL / LH/LL / NONE
-            confidence: Уверенность (0.0 - 1.0)
-
-        Returns:
-            ID записи или None при ошибке
+        Сохраняет тренд ТОЛЬКО если он изменился или прошло более 4 часов
+        (чтобы не забивать БД мусором каждую минуту)
         """
         try:
             async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+
+                # 🔧 Проверяем последний сохранённый тренд для этого символа
+                cursor = await conn.execute("""
+                    SELECT trend_direction, adx, created_time 
+                    FROM trend_analysis 
+                    WHERE symbol = ? 
+                    ORDER BY created_time DESC 
+                    LIMIT 1
+                """, (symbol,))
+
+                last_trend = await cursor.fetchone()
+
+                should_save = True
+
+                if last_trend:
+                    last_direction = last_trend['trend_direction']
+                    last_adx = last_trend['adx']
+                    last_time_str = last_trend['created_time']
+
+                    # Парсим время последней записи
+                    if last_time_str:
+                        try:
+                            last_time = datetime.fromisoformat(last_time_str.replace('Z', '+00:00'))
+                            hours_passed = (datetime.utcnow() - last_time).total_seconds() / 3600
+                        except:
+                            hours_passed = 999
+                    else:
+                        hours_passed = 999
+
+                    # Сохраняем только если:
+                    # 1. Изменилось направление тренда
+                    # 2. ADX изменился значительно (более чем на 5 пунктов)
+                    # 3. Прошло более 4 часов
+                    direction_changed = last_direction != trend_direction
+                    adx_changed = abs(last_adx - adx) > 5
+                    time_passed = hours_passed >= 4
+
+                    should_save = direction_changed or adx_changed or time_passed
+
+                    if not should_save:
+                        logger.debug(f"⏭️ {symbol}: тренд не изменился, пропускаем сохранение")
+                        return None
+                    else:
+                        reason = []
+                        if direction_changed:
+                            reason.append("направление изменилось")
+                        if adx_changed:
+                            reason.append(f"ADX изменился ({last_adx:.1f} → {adx:.1f})")
+                        if time_passed:
+                            reason.append(f"прошло {hours_passed:.1f} ч")
+                        logger.info(f"💾 {symbol}: сохраняем тренд ({', '.join(reason)})")
+
+                # Сохраняем тренд
                 cursor = await conn.execute("""
                     INSERT INTO trend_analysis (
                         symbol, trend_direction, adx, ema20, ema50,
@@ -465,9 +515,7 @@ class SignalRepository:
                 ))
                 await conn.commit()
                 trend_id = cursor.lastrowid
-                logger.info(f"📊 Тренд {symbol} сохранён: {trend_direction} (ADX={adx:.1f}, структура={structure})")
 
-                # Публикуем событие о новом анализе тренда
                 await self.event_bus.publish(
                     EventType.TREND_ANALYZED,
                     {
@@ -488,16 +536,6 @@ class SignalRepository:
             return None
 
     async def get_trend_analysis(self, symbol: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """
-        Получает историю анализа тренда для символа
-
-        Args:
-            symbol: Символ монеты
-            limit: Количество записей
-
-        Returns:
-            Список словарей с данными тренда
-        """
         try:
             async with aiosqlite.connect(self.db_path) as conn:
                 conn.row_factory = aiosqlite.Row
@@ -514,15 +552,6 @@ class SignalRepository:
             return []
 
     async def get_latest_trends(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """
-        Получает последние анализы тренда для всех символов
-
-        Args:
-            limit: Количество записей
-
-        Returns:
-            Список словарей с данными тренда
-        """
         try:
             async with aiosqlite.connect(self.db_path) as conn:
                 conn.row_factory = aiosqlite.Row
@@ -870,7 +899,6 @@ class SignalRepository:
                 losing_trades = trade_stats['losing_trades'] if trade_stats else 0
                 win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
 
-                # Фаза 1.3.10: Статистика по трендам
                 cursor = await conn.execute("SELECT COUNT(*) as total FROM trend_analysis")
                 row = await cursor.fetchone()
                 total_trends = row['total'] if row else 0
@@ -889,7 +917,7 @@ class SignalRepository:
                     'losing_trades': losing_trades,
                     'total_pnl': total_pnl,
                     'win_rate': win_rate,
-                    'total_trends': total_trends  # Фаза 1.3.10
+                    'total_trends': total_trends
                 }
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")

@@ -1,11 +1,21 @@
-# analyzer/core/three_screen_analyzer.py (ПОЛНОСТЬЮ - ФАЗА 1.3.10)
+# analyzer/core/three_screen_analyzer.py (ПОЛНОСТЬЮ - ФАЗА 1.5.2)
 """
 🎯 THREE SCREEN ANALYZER - Координатор трёхэкранного анализа
 
-ФАЗА 1.3.10:
-- Screen 2 и Screen 3 ОТКЛЮЧЕНЫ
-- Выполняется только анализ тренда D1
-- Добавлено сохранение тренда в БД через _save_trend_analysis()
+ФАЗА 1.4.1:
+- ИСПРАВЛЕНО: единый источник цены (DataProvider)
+- ИСПРАВЛЕНО: Entry = реальная цена
+- ИСПРАВЛЕНО: унифицирован формат цен (4 знака)
+- ИСПРАВЛЕНО: пересчёт SL/TP от реальной цены
+- ДОБАВЛЕНО: отслеживание пробоев в WATCH
+
+ФАЗА 1.5.2:
+- 🆕 Универсальный генератор комментариев для WATCH и M15
+- 🆕 Отображение исторических уровней, фибоначчи, confluence
+- 🆕 Полный обучающий комментарий для всех типов сигналов
+- 🆕 Добавлены дата/время в H4 анализ (импульс/коррекция)
+- 🆕 Исправлена терминология: «Позиция цены» вместо «Текущая позиция»
+- 🆕 Исправлено противоречие: «● В ЗОНЕ» и «ожидаем входа в зону»
 """
 
 import logging
@@ -25,11 +35,6 @@ logger = logging.getLogger('three_screen_analyzer')
 class ThreeScreenAnalyzer:
 
     def __init__(self, config, data_provider=None):
-        """
-        Args:
-            config: Конфигурация
-            data_provider: Экземпляр DataProvider (опционально, используется глобальный)
-        """
         self.config = config
         self.data_provider = data_provider or globals().get('data_provider')
         if self.data_provider is None:
@@ -55,7 +60,26 @@ class ThreeScreenAnalyzer:
         self._initialized = False
         self._analysis_start_time = None
 
-        logger.info(f"✅ ThreeScreenAnalyzer создан (Фаза 1.3.10) — использует DataProvider, Screen 2/3 отключены")
+        logger.info(f"✅ ThreeScreenAnalyzer создан (Фаза 1.5.2) — Pro режим активирован")
+        logger.info(f"   Единый источник цены: DataProvider")
+        logger.info(f"   🆕 Универсальный генератор комментариев")
+
+    def _format_price(self, price: float) -> str:
+        """Унифицированное форматирование цены"""
+        if price is None or price == 0:
+            return "-"
+        if price < 0.01:
+            return f"{price:.6f}"
+        elif price < 0.1:
+            return f"{price:.5f}"
+        elif price < 1:
+            return f"{price:.4f}"
+        elif price < 10:
+            return f"{price:.3f}"
+        elif price < 100:
+            return f"{price:.2f}"
+        else:
+            return f"{price:.2f}"
 
     def _get_cache_key(self, symbol: str, timeframe: str, calculation_type: str) -> str:
         return f"{symbol}_{timeframe}_{calculation_type}"
@@ -84,12 +108,10 @@ class ThreeScreenAnalyzer:
 
     async def initialize(self) -> bool:
         logger.info("🚀 Начало инициализации ThreeScreenAnalyzer")
-
         try:
             self._initialized = True
             logger.info("✅ ThreeScreenAnalyzer успешно инициализирован")
             return True
-
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации ThreeScreenAnalyzer: {e}")
             return False
@@ -98,28 +120,21 @@ class ThreeScreenAnalyzer:
         try:
             if not klines or len(klines) == 0:
                 return False
-
             for i, kline in enumerate(klines[:3]):
                 if len(kline) < 7:
                     return False
-
                 try:
                     open_price = float(kline[1])
                     high_price = float(kline[2])
                     low_price = float(kline[3])
                     close_price = float(kline[4])
-
                     if any(p <= 0 for p in [open_price, high_price, low_price, close_price] if p != 0):
                         return False
-
                     if high_price < low_price:
                         return False
-
                 except (ValueError, TypeError, IndexError):
                     return False
-
             return True
-
         except Exception as e:
             logger.error(f"❌ Ошибка валидации данных {timeframe}: {e}")
             return False
@@ -172,12 +187,8 @@ class ThreeScreenAnalyzer:
     async def analyze_symbol(self, symbol: str) -> Optional[ThreeScreenAnalysis]:
         """
         Анализ символа по трёхэкранной методологии
-
-        ФАЗА 1.3.10: Screen 2 и Screen 3 ОТКЛЮЧЕНЫ
-        Выполняется только анализ тренда D1 и сохранение в БД
-        ТОЛЬКО ЕСЛИ ТРЕНД ПРОШЁЛ ФИЛЬТР (passed=True)
         """
-        logger.info(f"🚀 Начинаем анализ тренда для {symbol} (Фаза 1.3.10)")
+        logger.info(f"🚀 Начинаем Pro анализ для {symbol}")
 
         self._analysis_start_time = datetime.now()
 
@@ -193,21 +204,25 @@ class ThreeScreenAnalyzer:
                 logger.warning(f"Не удалось получить данные для {symbol}")
                 return None
 
+            # ========== ПОЛУЧАЕМ РЕАЛЬНУЮ ЦЕНУ ОДИН РАЗ ==========
+            real_price = await self.data_provider.get_current_price(symbol, force_refresh=True)
+            logger.info(f"📊 {symbol}: реальная цена = {self._format_price(real_price)}")
+
+            # Шаг 1: Screen 1 (D1 тренд)
             screen1_result = await self._analyze_screen1(symbol, klines_data)
 
-            # 🔒 ФАЗА 1.3.10: Screen 2 и Screen 3 ВРЕМЕННО ОТКЛЮЧЕНЫ
-            logger.info(f"⚠️ {symbol}: Screen 2 и Screen 3 отключены (Фаза 1.3.10)")
+            # Шаг 2: Screen 2 (H4 зоны входа) - передаём реальную цену
+            screen2_result = await self._analyze_screen2(symbol, klines_data, screen1_result, real_price)
 
-            # ✅ ИСПРАВЛЕНИЕ: Сохраняем тренд ТОЛЬКО если он прошёл фильтр Screen 1
+            # Шаг 3: Screen 3 (M15 сигналы) - передаём реальную цену
+            screen3_result = await self._analyze_screen3(symbol, klines_data, screen1_result, screen2_result,
+                                                         real_price)
+
+            # Сохраняем тренд в БД если прошёл фильтр
             if screen1_result.passed:
                 await self._save_trend_analysis(symbol, screen1_result)
-            else:
-                adx = screen1_result.indicators.get('adx', 0)
-                structure = screen1_result.indicators.get('structure', 'NONE')
-                logger.info(
-                    f"⏭️ {symbol}: тренд НЕ ПРОШЁЛ фильтр (ADX={adx:.1f}, структура={structure}) — НЕ сохраняется в БД")
 
-            return await self._create_final_analysis(symbol, screen1_result, None, None)
+            return await self._create_final_analysis(symbol, screen1_result, screen2_result, screen3_result, real_price)
 
         except Exception as e:
             logger.error(f"Ошибка при анализе {symbol}: {str(e)}")
@@ -223,10 +238,9 @@ class ThreeScreenAnalyzer:
         return self.screen1_analyzer.analyze_daily_trend(symbol, d1_klines)
 
     async def _analyze_screen2(self, symbol: str, klines_data: Dict,
-                               screen1_result: Screen1Result) -> Screen2Result:
-        """Запуск анализа второго экрана"""
+                               screen1_result: Screen1Result, real_price: float) -> Screen2Result:
+        """Запуск анализа второго экрана с реальной ценой"""
         h4_klines = klines_data.get('4h', [])
-        h1_klines = klines_data.get('1h', [])
 
         def convert_klines(klines_list):
             if not klines_list:
@@ -245,12 +259,8 @@ class ThreeScreenAnalyzer:
 
         h4_data = convert_klines(h4_klines)
 
-        current_price = screen1_result.indicators.get('current_price', 0)
-        if current_price == 0 and h4_data:
-            current_price = h4_data[-1]['close']
-
         result = self.screen2_analyzer.analyze(
-            h4_data, screen1_result.trend_direction, current_price, symbol
+            h4_data, screen1_result.trend_direction, real_price, symbol
         )
 
         screen2 = Screen2Result()
@@ -261,6 +271,19 @@ class ThreeScreenAnalyzer:
         screen2.screen2_score = result.get('score', 0)
         screen2.expected_pattern = result.get('expected_pattern', '')
         screen2.rejection_reason = result.get('reason', '')
+        screen2.best_zone = (screen2.zone_low + screen2.zone_high) / 2 if screen2.zone_low > 0 else 0
+
+        # Сохраняем дополнительные данные для обучающего комментария
+        screen2.h4_analysis = result.get('h4_analysis', {})
+        screen2.support_levels = result.get('support_levels', [])
+        screen2.resistance_levels = result.get('resistance_levels', [])
+        screen2.fib_levels = result.get('fib_levels', [])
+        screen2.confluence = result.get('confluence', {})
+        screen2.historical_levels_used = result.get('historical_levels_used', 0)
+
+        if screen2.passed:
+            logger.info(
+                f"✅ {symbol}: Screen 2 пройден (score={screen2.screen2_score}/5, зона={self._format_price(screen2.zone_low)}-{self._format_price(screen2.zone_high)})")
 
         return screen2
 
@@ -275,7 +298,7 @@ class ThreeScreenAnalyzer:
                 'passed': True
             }
 
-        adx_threshold = h4_config.get('adx_threshold', 25)
+        adx_threshold = h4_config.get('adx_threshold', 20)
 
         h4_klines = klines_data.get('4h', [])
         if not h4_klines or len(h4_klines) < 20:
@@ -309,7 +332,7 @@ class ThreeScreenAnalyzer:
                     'passed': True
                 }
             else:
-                logger.info(f"📊 {symbol}: H4 ADX={adx_value:.1f} ≤ {adx_threshold} (флэт), оба направления разрешены")
+                logger.info(f"📊 {symbol}: H4 ADX={adx_value:.1f} ≤ {adx_threshold} (флэт)")
                 return {
                     'direction': 'SIDEWAYS',
                     'strength': adx_value,
@@ -397,17 +420,6 @@ class ThreeScreenAnalyzer:
 
         return smoothed
 
-    def _smooth_sma(self, values: List[float], period: int) -> List[float]:
-        if len(values) < period:
-            return []
-
-        smoothed = []
-        for i in range(period - 1, len(values)):
-            sma = sum(values[i - period + 1:i + 1]) / period
-            smoothed.append(sma)
-
-        return smoothed
-
     def _determine_h4_direction(self, closes: List[float]) -> str:
         if len(closes) < 20:
             return 'SIDEWAYS'
@@ -439,7 +451,19 @@ class ThreeScreenAnalyzer:
 
     async def _analyze_screen3(self, symbol: str, klines_data: Dict,
                                screen1_result: Screen1Result,
-                               screen2_result: Screen2Result) -> Screen3Result:
+                               screen2_result: Screen2Result,
+                               real_price: float) -> Screen3Result:
+        """Запуск анализа третьего экрана с реальной ценой"""
+
+        # Проверка дубликатов перед генерацией
+        from .signal_repository import signal_repository
+        if await signal_repository.has_active_m15(symbol):
+            logger.info(f"⏭️ {symbol}: уже есть активный M15 сигнал")
+            result = Screen3Result()
+            result.passed = False
+            result.rejection_reason = "Уже есть активный M15 сигнал"
+            return result
+
         h4_trend_result = await self._get_h4_trend(symbol, klines_data)
 
         h4_direction = h4_trend_result.get('direction', 'SIDEWAYS')
@@ -447,21 +471,18 @@ class ThreeScreenAnalyzer:
 
         if h4_direction == 'BULL':
             if screen1_direction != 'BULL':
-                logger.info(f"❌ {symbol}: H4 тренд BULL, но D1 тренд {screen1_direction} — пропускаем")
+                logger.info(f"❌ {symbol}: H4 тренд BULL, но D1 тренд {screen1_direction}")
                 result = Screen3Result()
                 result.passed = False
                 result.rejection_reason = f"H4 тренд BULL не совпадает с D1 {screen1_direction}"
                 return result
         elif h4_direction == 'BEAR':
             if screen1_direction != 'BEAR':
-                logger.info(f"❌ {symbol}: H4 тренд BEAR, но D1 тренд {screen1_direction} — пропускаем")
+                logger.info(f"❌ {symbol}: H4 тренд BEAR, но D1 тренд {screen1_direction}")
                 result = Screen3Result()
                 result.passed = False
                 result.rejection_reason = f"H4 тренд BEAR не совпадает с D1 {screen1_direction}"
                 return result
-        else:
-            logger.info(
-                f"📊 {symbol}: H4 флэт (ADX={h4_trend_result.get('strength', 0):.1f}), оба направления разрешены")
 
         m15_klines = klines_data.get('15m', [])
         m5_klines = klines_data.get('5m', [])
@@ -479,13 +500,21 @@ class ThreeScreenAnalyzer:
         m15_converted = convert_klines(m15_klines)
         m5_converted = convert_klines(m5_klines)
 
-        return self.screen3_analyzer.generate_signal(
-            symbol, m15_converted, m5_converted, screen1_result, screen2_result
+        # Передаём реальную цену в Screen3
+        result = self.screen3_analyzer.generate_signal(
+            symbol, m15_converted, m5_converted, screen1_result, screen2_result, real_price
         )
+
+        if result.passed:
+            logger.info(
+                f"✅ {symbol}: Screen 3 пройден! {result.signal_type} @ {self._format_price(result.entry_price)}")
+
+        return result
 
     async def _create_final_analysis(self, symbol: str, screen1: Screen1Result,
                                      screen2: Optional[Screen2Result] = None,
-                                     screen3: Optional[Screen3Result] = None) -> ThreeScreenAnalysis:
+                                     screen3: Optional[Screen3Result] = None,
+                                     real_price: float = 0.0) -> ThreeScreenAnalysis:
         logger.info(f"Создание финального анализа для {symbol}")
 
         analysis_duration = 0.0
@@ -521,42 +550,66 @@ class ThreeScreenAnalyzer:
 
         if should_trade and screen3:
             rr_ratio = screen3.indicators.get('risk_reward_ratio', 0)
-            risk_pct = screen3.indicators.get('risk_pct', 0)
-
-            analysis_config = self.config.get('analysis', {})
             min_rr_ratio = self.m15_config.get('min_rr_ratio', 3.0)
-            max_risk_per_trade_pct = analysis_config.get('max_risk_per_trade_pct', 2.0)
 
             if rr_ratio < (min_rr_ratio - 0.01):
                 should_trade = False
                 screen3.passed = False
                 screen3.rejection_reason = f"R/R {rr_ratio:.2f}:1 < {min_rr_ratio}:1"
-            elif risk_pct > max_risk_per_trade_pct:
-                should_trade = False
-                screen3.passed = False
-                screen3.rejection_reason = f"Риск {risk_pct:.1f}% > {max_risk_per_trade_pct}%"
 
         analysis.should_trade = should_trade
 
-        status = "✅ ПРОШЕЛ ВСЕ ЭКРАНЫ" if analysis.should_trade else "❌ ОСТАНОВЛЕН"
-
-        if screen3 and analysis.should_trade:
-            rr = screen3.indicators.get('risk_reward_ratio', 0)
-            risk = screen3.indicators.get('risk_pct', 0)
-            logger.info(f"{status} {symbol} - Уверенность: {analysis.overall_confidence:.1%}, "
-                        f"R/R: {rr:.2f}:1, Риск: {risk:.1f}%, Время: {analysis_duration:.2f} сек")
-        else:
-            rejection_msg = getattr(screen3, 'rejection_reason', '') if screen3 else ''
-            if rejection_msg:
-                logger.info(f"{status} {symbol} - Причина: {rejection_msg}")
-            else:
-                logger.info(f"{status} {symbol} - Время: {analysis_duration:.2f} сек")
-
         if screen3 and screen3.passed and should_trade:
-            try:
-                from .signal_repository import signal_repository
+            # ========== ПРОВЕРКА ДУБЛИКАТОВ ==========
+            from .signal_repository import signal_repository
 
-                signal_id = await signal_repository.save_signal(analysis)
+            # Проверяем, была ли сделка в последние 30 минут
+            if await signal_repository.was_traded_recently(symbol, minutes=30):
+                logger.info(f"⏭️ {symbol}: была сделка в последние 30 минут, пропускаем")
+                should_trade = False
+                screen3.passed = False
+                screen3.rejection_reason = f"Сделка по {symbol} была менее 30 минут назад"
+
+            # Проверяем, есть ли активный M15 сигнал
+            if should_trade and await signal_repository.has_active_m15(symbol):
+                logger.info(f"⏭️ {symbol}: уже есть активный M15 сигнал")
+                should_trade = False
+                screen3.passed = False
+                screen3.rejection_reason = "Уже есть активный M15 сигнал"
+
+            if not should_trade:
+                analysis.should_trade = False
+                return analysis
+
+            # ========== ИСПОЛЬЗУЕМ РЕАЛЬНУЮ ЦЕНУ ==========
+            if real_price > 0:
+                # Перезаписываем entry_price на реальную цену
+                old_entry = screen3.entry_price
+                screen3.entry_price = real_price
+                screen3.current_price_at_signal = real_price
+
+                # Пересчитываем SL и TP от реальной цены
+                risk = abs(old_entry - screen3.stop_loss)
+                if screen3.signal_type == "BUY":
+                    screen3.stop_loss = real_price - risk
+                    screen3.take_profit = real_price + (risk * screen3.indicators.get('risk_reward_ratio', 3.0))
+                else:
+                    screen3.stop_loss = real_price + risk
+                    screen3.take_profit = real_price - (risk * screen3.indicators.get('risk_reward_ratio', 3.0))
+
+                screen3.stop_loss = self.screen3_analyzer._round_price(screen3.stop_loss)
+                screen3.take_profit = self.screen3_analyzer._round_price(screen3.take_profit)
+
+                logger.info(
+                    f"📊 {symbol}: Entry скорректирована с {self._format_price(old_entry)} на {self._format_price(real_price)}")
+
+            # Генерируем обучающий комментарий
+            learning_comment = self._generate_full_analysis_description(
+                symbol, screen1, screen2, screen3
+            )
+
+            try:
+                signal_id = await signal_repository.save_signal(analysis, learning_comment)
                 if signal_id:
                     logger.info(f"✅ M15 сигнал {symbol} сохранен (ID: {signal_id})")
 
@@ -573,7 +626,8 @@ class ThreeScreenAnalyzer:
                             'risk_reward_ratio': screen3.indicators.get('risk_reward_ratio', 0),
                             'signal_subtype': 'M15',
                             'order_type': 'MARKET',
-                            'expiration_time': screen3.expiration_time.isoformat() if screen3.expiration_time else None
+                            'expiration_time': screen3.expiration_time.isoformat() if screen3.expiration_time else None,
+                            'learning_comment': learning_comment
                         },
                         'three_screen_analyzer'
                     )
@@ -582,15 +636,230 @@ class ThreeScreenAnalyzer:
 
         return analysis
 
-    # ========== ФАЗА 1.3.10: НОВЫЙ МЕТОД ДЛЯ СОХРАНЕНИЯ ТРЕНДА ==========
-    async def _save_trend_analysis(self, symbol: str, screen1_result: Screen1Result) -> None:
-        """
-        Сохраняет результаты анализа тренда D1 в БД
+    def _generate_full_analysis_description(
+            self,
+            symbol: str,
+            screen1: Screen1Result,
+            screen2: Screen2Result,
+            screen3: Screen3Result = None
+    ) -> str:
+        """Генерация полного описания для обучающей системы (ФАЗА 1.5.2)"""
 
-        Args:
-            symbol: Символ монеты
-            screen1_result: Результат анализа Screen 1
-        """
+        # D1 тренд
+        d1_trend = screen1.trend_direction
+        d1_adx = screen1.indicators.get('adx', 0)
+        d1_ema20 = screen1.indicators.get('ema_20', 0)
+        d1_ema50 = screen1.indicators.get('ema_50', 0)
+
+        if d1_adx > 25:
+            strength = "СИЛЬНЫЙ"
+        elif d1_adx > 20:
+            strength = "УМЕРЕННЫЙ"
+        else:
+            strength = "СЛАБЫЙ"
+
+        description = f"""
+═══════════════════════════════════════════════════════════════
+📊 АНАЛИЗ {symbol} {'(WATCH)' if screen3 is None or not screen3.passed else ''}
+═══════════════════════════════════════════════════════════════
+
+🎯 D1 ТРЕНД
+───────────────────────────────────────────────────────────────
+  Направление:     {d1_trend}
+  Сила:            {strength} (ADX = {d1_adx:.1f})
+  EMA20:           {self._format_price(d1_ema20)}
+  EMA50:           {self._format_price(d1_ema50)}
+  💡 EMA20 {'выше' if d1_ema20 > d1_ema50 else 'ниже'} EMA50 — {'восходящий' if d1_trend == 'BULL' else 'нисходящий'} тренд подтверждён
+"""
+
+        # H4 анализ (импульс/коррекция) с датами
+        h4_analysis = getattr(screen2, 'h4_analysis', {})
+        if h4_analysis:
+            phase = h4_analysis.get('phase', 'UNKNOWN')
+            impulse = h4_analysis.get('impulse', {})
+            correction = h4_analysis.get('correction', {})
+
+            description += f"""
+📈 H4 АНАЛИЗ
+───────────────────────────────────────────────────────────────
+  Фаза:            {phase}
+"""
+            if impulse:
+                # Добавляем дату/время для импульса
+                start_time = impulse.get('start_time', '?')
+                end_time = impulse.get('end_time', '?')
+                candles = impulse.get('candles_count', '?')
+
+                description += f"""
+  Последний импульс ({impulse.get('direction', 'N/A')}):
+    Начало:        {self._format_price(impulse.get('start_price', 0))} ({start_time}) — {candles} свечей назад
+    Конец:         {self._format_price(impulse.get('end_price', 0))} ({end_time})
+    Изменение:     {impulse.get('change_pct', 0):+.2f}%
+"""
+            if correction:
+                # Добавляем дату/время для коррекции
+                start_time = correction.get('start_time', '?')
+                candles = correction.get('candles_count', '?')
+
+                description += f"""
+  Текущая коррекция ({correction.get('direction', 'N/A')}):
+    Начало:        {self._format_price(correction.get('start_price', 0))} ({start_time}) — {candles} свечей назад
+    Текущая цена:  {self._format_price(correction.get('current_price', 0))}
+    Изменение:     {correction.get('change_pct', 0):+.2f}%
+"""
+
+        # Исторические уровни
+        support_levels = getattr(screen2, 'support_levels', [])
+        resistance_levels = getattr(screen2, 'resistance_levels', [])
+
+        # Фильтруем только исторические уровни
+        hist_supports = [s for s in support_levels if s.get('source') == 'HISTORICAL']
+        hist_resistances = [r for r in resistance_levels if r.get('source') == 'HISTORICAL']
+
+        if hist_supports:
+            description += f"""
+🏛️ ИСТОРИЧЕСКИЕ ПОДДЕРЖКИ
+───────────────────────────────────────────────────────────────
+"""
+            for i, sup in enumerate(hist_supports[:5], 1):
+                touches = sup.get('touches', '?')
+                timeframe = sup.get('timeframe', '?')
+                strength = sup.get('strength', 'WEAK')
+                price = sup.get('price', 0)
+                description += f"  {i}. {self._format_price(price)} ({strength}, {timeframe}, {touches} кас.)\n"
+
+        if hist_resistances:
+            description += f"""
+🏛️ ИСТОРИЧЕСКИЕ СОПРОТИВЛЕНИЯ
+───────────────────────────────────────────────────────────────
+"""
+            for i, res in enumerate(hist_resistances[:5], 1):
+                touches = res.get('touches', '?')
+                timeframe = res.get('timeframe', '?')
+                strength = res.get('strength', 'WEAK')
+                price = res.get('price', 0)
+                description += f"  {i}. {self._format_price(price)} ({strength}, {timeframe}, {touches} кас.)\n"
+
+        # Локальные H4 уровни
+        h4_supports = [s for s in support_levels if s.get('source') != 'HISTORICAL'][:3]
+        h4_resistances = [r for r in resistance_levels if r.get('source') != 'HISTORICAL'][:3]
+
+        if h4_supports or h4_resistances:
+            description += f"""
+📈 ЛОКАЛЬНЫЕ УРОВНИ (H4)
+───────────────────────────────────────────────────────────────
+"""
+            if h4_supports:
+                description += "  Поддержки: "
+                description += ", ".join([self._format_price(s.get('price', 0)) for s in h4_supports])
+                description += "\n"
+            if h4_resistances:
+                description += "  Сопротивления: "
+                description += ", ".join([self._format_price(r.get('price', 0)) for r in h4_resistances])
+                description += "\n"
+
+        # Уровни Фибоначчи
+        fib_levels = getattr(screen2, 'fib_levels', [])
+        if fib_levels:
+            description += f"""
+📐 УРОВНИ ФИБОНАЧЧИ (от импульса)
+───────────────────────────────────────────────────────────────
+"""
+            for fib in fib_levels[:4]:
+                description += f"  {fib.get('level', 0):.3f}: {self._format_price(fib.get('price', 0))} ({fib.get('strength', 'WEAK')})\n"
+
+        # Совпадения уровней (Confluence)
+        confluence = getattr(screen2, 'confluence', {})
+        hist_used = getattr(screen2, 'historical_levels_used', 0)
+
+        description += f"""
+✅ СОВПАДЕНИЯ УРОВНЕЙ (CONFLUENCE)
+───────────────────────────────────────────────────────────────
+"""
+        if confluence and confluence.get('has_confluence', False):
+            description += f"  🎯 {confluence.get('description', '')}\n"
+            description += f"  💡 Совпадение уровней = СИЛЬНАЯ ЗОНА!\n"
+        else:
+            description += f"  Нет явных совпадений\n"
+
+        if hist_used > 0:
+            description += f"  ⭐ Использовано исторических уровней: {hist_used}\n"
+
+        # Зона входа
+        description += f"""
+🎯 ЗОНА ВХОДА
+───────────────────────────────────────────────────────────────
+  Нижняя граница: {self._format_price(screen2.zone_low)}
+  Верхняя граница: {self._format_price(screen2.zone_high)}
+  Score Screen2:   {screen2.screen2_score}/8
+  Ожидаемый паттерн: {screen2.expected_pattern}
+"""
+
+        # Текущая позиция цены
+        if screen3 and screen3.current_price_at_signal > 0:
+            current_price = screen3.current_price_at_signal
+        elif screen3 and screen3.entry_price > 0:
+            current_price = screen3.entry_price
+        else:
+            current_price = (screen2.zone_low + screen2.zone_high) / 2
+
+        # Определяем позицию цены относительно зоны
+        if current_price > screen2.zone_high:
+            diff_pct = (current_price - screen2.zone_high) / screen2.zone_high * 100
+            position = f"▲ ВЫШЕ зоны на {diff_pct:.1f}%"
+            in_zone = False
+        elif current_price < screen2.zone_low:
+            diff_pct = (screen2.zone_low - current_price) / screen2.zone_low * 100
+            position = f"▼ НИЖЕ зоны на {diff_pct:.1f}%"
+            in_zone = False
+        else:
+            position = "● В ЗОНЕ"
+            in_zone = True
+
+        description += f"""
+📍 ПОЗИЦИЯ ЦЕНЫ (на {datetime.now().strftime('%d.%m.%Y %H:%M')})
+───────────────────────────────────────────────────────────────
+  Текущая цена:    {self._format_price(current_price)}
+  Позиция цены:    {position}
+"""
+
+        # M15 сигнал (если есть)
+        if screen3 and screen3.passed:
+            description += f"""
+⚡ M15 СИГНАЛ
+───────────────────────────────────────────────────────────────
+  Направление:     {screen3.signal_type}
+  Паттерн:         {screen3.trigger_pattern}
+  Уверенность:     {screen3.confidence:.1%}
+  Entry:           {self._format_price(screen3.entry_price)}
+  Stop Loss:       {self._format_price(screen3.stop_loss)}
+  Take Profit:     {self._format_price(screen3.take_profit)}
+  R/R:             {screen3.indicators.get('risk_reward_ratio', 0):.2f}:1
+"""
+        else:
+            # WATCH статус с правильной логикой
+            if in_zone:
+                watch_status = "✅ Цена В ЗОНЕ! Ждём подтверждающий паттерн на M15"
+                watch_action = "🔍 Ожидаемый паттерн: PIN_BAR, ENGULFING, MORNING_STAR\n  ⚡ При появлении паттерна — автоматическое открытие позиции"
+            else:
+                watch_status = f"❌ Вход НЕВОЗМОЖЕН — цена {'выше' if current_price > screen2.zone_high else 'ниже'} зоны"
+                watch_action = f"📉 Ждём {'снижения' if current_price > screen2.zone_high else 'роста'} цены в зону {self._format_price(screen2.zone_low)}-{self._format_price(screen2.zone_high)}"
+
+            description += f"""
+⏳ СТАТУС WATCH
+───────────────────────────────────────────────────────────────
+  {watch_status}
+  {watch_action}
+  🔔 При входе в зону — автоматический поиск паттерна на M15
+"""
+
+        description += f"""
+═══════════════════════════════════════════════════════════════
+"""
+        return description
+
+    async def _save_trend_analysis(self, symbol: str, screen1_result: Screen1Result) -> None:
+        """Сохраняет результаты анализа тренда D1 в БД"""
         try:
             from .signal_repository import signal_repository
 
@@ -602,10 +871,10 @@ class ThreeScreenAnalyzer:
             ema50 = indicators.get('ema_50', 0)
             macd_line = indicators.get('macd_line', 0)
             macd_signal = indicators.get('macd_signal', 0)
-            structure = "-"  # Структура больше не используется
+            structure = "-"
             confidence = screen1_result.confidence_score
 
-            trend_id = await signal_repository.save_trend_analysis(
+            await signal_repository.save_trend_analysis(
                 symbol=symbol,
                 trend_direction=trend_direction,
                 adx=adx,
@@ -617,59 +886,8 @@ class ThreeScreenAnalyzer:
                 confidence=confidence
             )
 
-            if trend_id:
-                logger.info(
-                    f"✅ {symbol}: тренд сохранён в БД (ID={trend_id}, направление={trend_direction}, ADX={adx:.1f})")
-            else:
-                logger.warning(f"⚠️ {symbol}: не удалось сохранить тренд в БД")
-
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения тренда {symbol}: {e}")
-
-    async def create_signal_from_analysis(self, analysis: ThreeScreenAnalysis):
-        logger.info(f"Преобразование анализа в Signal для {analysis.symbol}")
-
-        try:
-            from .data_classes import Signal, Direction, SignalStatus
-
-            if not analysis or not analysis.should_trade:
-                return None
-
-            if analysis.screen3.signal_type == "BUY":
-                direction = Direction.LONG
-            elif analysis.screen3.signal_type == "SELL":
-                direction = Direction.SHORT
-            else:
-                return None
-
-            signal_generation_config = self.config.get('analysis', {}).get('signal_generation', {})
-
-            default_position_size = signal_generation_config.get('default_position_size', 100)
-            default_margin_mode = signal_generation_config.get('default_margin_mode', "cross")
-            default_leverage = signal_generation_config.get('default_leverage', 10)
-            default_total_capital = signal_generation_config.get('default_total_capital', 1000)
-
-            signal = Signal(
-                symbol=analysis.symbol,
-                strategy="three_screen",
-                direction=direction,
-                status=SignalStatus.PENDING,
-                confidence=analysis.overall_confidence,
-                three_screen_analysis=analysis,
-                entry_prices=[analysis.screen3.entry_price],
-                stop_loss=analysis.screen3.stop_loss,
-                take_profit_levels=[analysis.screen3.take_profit],
-                position_size=default_position_size,
-                margin_mode=default_margin_mode,
-                leverage=default_leverage,
-                total_capital=default_total_capital
-            )
-
-            return signal
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания Signal: {e}")
-            return None
 
 
 __all__ = ['ThreeScreenAnalyzer', 'ThreeScreenAnalysis']

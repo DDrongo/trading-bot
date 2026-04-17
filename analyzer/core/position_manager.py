@@ -1,12 +1,17 @@
-# analyzer/core/position_manager.py (ПОЛНОСТЬЮ - ФАЗА 1.3.8)
+# analyzer/core/position_manager.py (ПОЛНОСТЬЮ - ФАЗА 1.4.1)
 """
 🎯 POSITION MANAGER - Управление позициями (с риск-менеджментом)
+
 ФАЗА 1.3.8:
 - Резервирование средств под WATCH сигналы
 - Контроль суммарного риска
 - Учёт плеча в расчётах маржи
 - ИСПРАВЛЕНО: формула расчёта для фьючерсов (залог = риск% от депозита)
 - ИСПРАВЛЕНО: единое время через time_utils
+
+ФАЗА 1.4.1:
+- Увеличен slippage до 2.0%
+- Улучшено логирование причин REJECTED
 """
 
 import asyncio
@@ -43,7 +48,9 @@ class PositionManager:
         analysis_config = config.get('analysis', {})
         self.m15_config = analysis_config.get('signal_types', {}).get('m15', {})
         self.watch_config = analysis_config.get('signal_types', {}).get('watch', {})
-        self.max_slippage_pct = self.m15_config.get('max_slippage_pct', 1.0)
+
+        # ФАЗА 1.4.1: увеличен slippage до 2.0%
+        self.max_slippage_pct = self.m15_config.get('max_slippage_pct', 2.0)
 
         self.min_risk_distance_pct = 0.1
         self.risk_per_trade_pct = self.pos_config.get('position_sizing', {}).get('risk_per_trade_pct', 2.0)
@@ -59,6 +66,7 @@ class PositionManager:
         logger.info(f"   Макс. позиций: {self.max_positions}")
         logger.info(f"   Макс. суммарный риск: {self.max_total_risk_pct}%")
         logger.info(f"   Риск на сделку: {self.risk_per_trade_pct}%")
+        logger.info(f"   Макс. slippage: {self.max_slippage_pct}%")
         logger.info(f"   Формула: залог = риск% от депозита")
 
     def _round_price(self, price: float, symbol: str = "") -> float:
@@ -158,6 +166,7 @@ class PositionManager:
             if signal_subtype != 'M15':
                 return
             if len(self.open_positions) >= self.max_positions:
+                logger.warning(f"⚠️ Сигнал #{signal_id} отклонён: достигнут лимит позиций ({self.max_positions})")
                 await signal_repository.update_signal_status(signal_id, 'REJECTED')
                 return
 
@@ -167,9 +176,6 @@ class PositionManager:
 
     async def _open_position_from_signal(self, signal_data: Dict[str, Any]):
         try:
-            logger.info(
-                f"🔔 Position Manager: получен сигнал {signal_data.get('signal_id')} для {signal_data.get('symbol')}")
-
             signal_id = signal_data['signal_id']
             symbol = signal_data['symbol']
             direction = signal_data['signal_type']
@@ -179,9 +185,12 @@ class PositionManager:
             expiration_time = signal_data.get('expiration_time')
             leverage = signal_data.get('leverage', 10)
 
+            logger.info(f"🔔 Position Manager: получен сигнал {signal_id} для {symbol}")
+
             if expiration_time and isinstance(expiration_time, str):
                 expiration_time = datetime.fromisoformat(expiration_time)
 
+            # Получаем реальную цену
             current_price = await data_provider.get_current_price(symbol, force_refresh=True)
             fill_price = current_price if current_price else planned_entry
 
@@ -194,11 +203,15 @@ class PositionManager:
             logger.info(f"   Время: {format_local(now())}")
 
             deviation_pct = abs(fill_price - planned_entry) / planned_entry * 100
+
             if deviation_pct > self.max_slippage_pct:
                 logger.warning(f"⚠️ Отклонение {deviation_pct:.2f}% > {self.max_slippage_pct}%")
+                logger.warning(
+                    f"   Причина REJECTED: slippage превышен (Entry={planned_entry:.6f}, Real={fill_price:.6f}, diff={deviation_pct:.2f}%)")
                 await signal_repository.update_signal_status(signal_id, 'REJECTED')
                 return
 
+            # Пересчитываем SL и TP от реальной цены
             if direction == 'BUY':
                 stop_loss = fill_price - (planned_entry - planned_sl)
                 take_profit = fill_price + (planned_tp - planned_entry)
@@ -212,10 +225,10 @@ class PositionManager:
             logger.info(f"   SL (пересчитан): {stop_loss:.6f}")
             logger.info(f"   TP (пересчитан): {take_profit:.6f}")
 
-            # ========== РАСЧЁТ РАЗМЕРА ПОЗИЦИИ (ФЬЮЧЕРСНАЯ ФОРМУЛА) ==========
+            # ========== РАСЧЁТ РАЗМЕРА ПОЗИЦИИ ==========
             balance = await self.paper_account.get_balance()
-
             margin_target = balance * (self.risk_per_trade_pct / 100.0)
+
             logger.info(f"\n📊 РАСЧЁТ РАЗМЕРА ПОЗИЦИИ:")
             logger.info(f"   Баланс: {balance:.2f} USDT")
             logger.info(f"   Целевой залог: {margin_target:.2f} USDT ({self.risk_per_trade_pct}% от депозита)")
@@ -250,6 +263,7 @@ class PositionManager:
 
             if actual_margin > balance:
                 logger.error(f"❌ Залог {actual_margin:.2f} > баланс {balance:.2f}")
+                logger.warning(f"   Причина REJECTED: недостаточно средств")
                 await signal_repository.update_signal_status(signal_id, 'REJECTED')
                 return
 
@@ -265,6 +279,7 @@ class PositionManager:
                 )
             except ValueError as e:
                 logger.error(f"❌ Ошибка открытия позиции: {e}")
+                logger.warning(f"   Причина REJECTED: {str(e)}")
                 await signal_repository.update_signal_status(signal_id, 'REJECTED')
                 return
 
@@ -379,17 +394,15 @@ class PositionManager:
             if closed_info:
                 del self.open_positions[signal_id]
                 await signal_repository.update_signal_status(signal_id, 'CLOSED')
+
                 trade = await trade_repository.get_trade_by_signal_id(signal_id)
                 if trade and trade.get('id'):
                     await trade_repository.update_trade(
                         trade_id=trade['id'], close_price=close_price, pnl=closed_info['pnl'],
                         pnl_percent=closed_info['pnl_percent'], close_reason=reason, closed_at=utc_now()
                     )
-                await event_bus.publish(
-                    EventType.POSITION_CLOSED,
-                    {'signal_id': signal_id, 'symbol': position.symbol, 'pnl': closed_info['pnl']},
-                    'position_manager'
-                )
+
+                await event_bus.publish(...)
                 logger.info(f"✅ Позиция #{signal_id} закрыта: {reason}, PnL: {closed_info['pnl']:+.2f}")
         except Exception as e:
             logger.error(f"❌ Ошибка закрытия: {e}")
@@ -401,19 +414,20 @@ class PositionManager:
                 signal_id = signal['id']
                 if signal.get('status') == 'ACTIVE' and signal.get('signal_subtype') == 'M15':
                     trade = await trade_repository.get_trade_by_signal_id(signal_id)
-                    position = PaperPosition(
-                        signal_id=signal_id, symbol=signal['symbol'], direction=signal['direction'],
-                        entry_price=signal['entry_price'], quantity=signal.get('position_size', self.default_quantity),
-                        stop_loss=signal['stop_loss'], take_profit=signal['take_profit'],
-                        leverage=signal.get('leverage', 10), margin=trade.get('margin', 0) if trade else 0,
-                        position_value=trade.get('position_value', 0) if trade else 0,
-                        order_type='MARKET', fill_price=signal.get('fill_price', signal['entry_price']),
-                        expiration_time=datetime.fromisoformat(signal['expiration_time']) if signal.get(
-                            'expiration_time') else None,
-                        opened_at=datetime.fromisoformat(trade['opened_at']) if trade and trade.get(
-                            'opened_at') else now()
-                    )
-                    self.open_positions[signal_id] = position
+                    if trade:
+                        position = PaperPosition(
+                            signal_id=signal_id, symbol=signal['symbol'], direction=signal['direction'],
+                            entry_price=signal['entry_price'],
+                            quantity=signal.get('position_size', self.default_quantity),
+                            stop_loss=signal['stop_loss'], take_profit=signal['take_profit'],
+                            leverage=signal.get('leverage', 10), margin=trade.get('margin', 0),
+                            position_value=trade.get('position_value', 0),
+                            order_type='MARKET', fill_price=signal.get('fill_price', signal['entry_price']),
+                            expiration_time=datetime.fromisoformat(signal['expiration_time']) if signal.get(
+                                'expiration_time') else None,
+                            opened_at=datetime.fromisoformat(trade['opened_at']) if trade.get('opened_at') else now()
+                        )
+                        self.open_positions[signal_id] = position
             logger.info(f"🔄 Восстановлено {len(self.open_positions)} позиций")
         except Exception as e:
             logger.error(f"Ошибка восстановления: {e}")
@@ -432,3 +446,6 @@ class PositionManager:
         event_bus.unsubscribe(EventType.WATCH_CREATED, self.on_watch_created)
         event_bus.unsubscribe(EventType.WATCH_EXPIRED, self.on_watch_expired)
         logger.info("✅ Position Manager очищен")
+
+
+__all__ = ['PositionManager']

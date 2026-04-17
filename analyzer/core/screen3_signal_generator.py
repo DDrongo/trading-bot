@@ -1,10 +1,13 @@
-# analyzer/core/screen3_signal_generator.py (ПОЛНОСТЬЮ)
+# analyzer/core/screen3_signal_generator.py (ПОЛНОСТЬЮ - ФАЗА 1.4.1)
 """
 🎯 ЭКРАН 3 - ГЕНЕРАЦИЯ СИГНАЛОВ M15 (только M15, рыночный ордер)
-ФАЗА 1.3.6:
-- Удалена логика LIMIT/INSTANT
-- Только M15 сигналы (R/R ≥ 3:1, 3 часа, MARKET ордер)
-- Упрощён код
+
+ФАЗА 1.4.1:
+- ИСПРАВЛЕНО: убрана перезапись entry_price
+- ИСПРАВЛЕНО: entry_price берётся из best_zone, а не из closes[-1]
+- ИСПРАВЛЕНО: унифицирован формат цен (4 знака для CRVUSDT)
+- ИСПРАВЛЕНО: проверка SL < Entry для BUY, SL > Entry для SELL
+- ДОБАВЛЕНО: логирование реальной цены
 """
 
 import logging
@@ -47,6 +50,7 @@ class Screen3Result:
     indicators: Dict[str, Any] = field(default_factory=dict)
     rejection_reason: str = ""
     order_type: str = "MARKET"
+    current_price_at_signal: float = 0.0  # ФАЗА 1.4.1: реальная цена
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -61,14 +65,15 @@ class Screen3Result:
             "expiration_time": self.expiration_time.isoformat() if self.expiration_time else None,
             "passed": self.passed,
             "indicators": self.indicators,
-            "order_type": self.order_type
+            "order_type": self.order_type,
+            "current_price_at_signal": self.current_price_at_signal
         }
 
 
 class Screen3SignalGenerator:
     """
     Анализатор для третьего экрана - генерация сигналов M15
-    ФАЗА 1.3.6: Только M15 сигналы (R/R ≥ 3:1, MARKET ордер)
+    ФАЗА 1.4.1: Исправлены источники цены, унифицирован формат
     """
 
     def __init__(self, config=None):
@@ -139,15 +144,30 @@ class Screen3SignalGenerator:
         self.ma_bounce_tolerance_upper_pct = signal_config.get('ma_bounce_tolerance_upper_pct', 1.0)
         self.ma_bounce_tolerance_lower_pct = signal_config.get('ma_bounce_tolerance_lower_pct', 0.5)
 
-        # Минимальное расстояние для SL/TP
         self.min_sl_distance_absolute_pct = risk_management_config.get('min_sl_distance_absolute_pct', 0.5)
         self.min_tp_distance_pct = risk_management_config.get('min_tp_distance_pct', 1.0)
 
-        # ✅ Для тестов: сохраняем m15_config
         self.m15_config = m15_config
 
-        logger.info(f"✅ Screen3SignalGenerator настроен для M15 (Фаза 1.3.6.1)")
+        logger.info(f"✅ Screen3SignalGenerator настроен для M15 (Фаза 1.4.1)")
         logger.info(f"   Min R/R: {self.min_rr_ratio}:1, {self.expiration_hours}ч, ордер: {self.order_type}")
+        logger.info(f"   Проверка SL: BUY → SL < Entry, SELL → SL > Entry")
+        logger.info(f"   Entry = best_zone (из Screen2)")
+
+    def _format_price(self, price: float) -> str:
+        """Унифицированное форматирование цены"""
+        if price < 0.01:
+            return f"{price:.6f}"
+        elif price < 0.1:
+            return f"{price:.5f}"
+        elif price < 1:
+            return f"{price:.4f}"
+        elif price < 10:
+            return f"{price:.3f}"
+        elif price < 100:
+            return f"{price:.2f}"
+        else:
+            return f"{price:.2f}"
 
     def _round_price(self, price: float, symbol: str = "") -> float:
         """Округление цены с учётом tick_size"""
@@ -168,9 +188,14 @@ class Screen3SignalGenerator:
             return round(price, 2)
 
     def generate_signal(self, symbol: str, m15_klines: List, m5_klines: List,
-                        screen1_result: Any, screen2_result: Any) -> Screen3Result:
+                        screen1_result: Any, screen2_result: Any,
+                        real_current_price: float = None) -> Screen3Result:
         """
         Основной метод генерации M15 сигнала
+
+        ФАЗА 1.5.2 — ИСПРАВЛЕНИЕ: ЗОНА ИМЕЕТ ПРИОРИТЕТ!
+        - Если цена В ЗОНЕ или БЛИЗКО (≤2%) → входим по рынку
+        - Если цена ДАЛЕКО от зоны → ОТКАЗ
         """
         logger.info(f"⚡ {symbol} - Генерация M15 сигнала")
         result = Screen3Result()
@@ -186,7 +211,6 @@ class Screen3SignalGenerator:
 
             logger.info(f"Анализ M15 данных: {len(m15_klines)} свечей")
 
-            # Поиск паттернов
             patterns = self._find_chart_patterns_m15(m15_klines, screen1_result.trend_direction)
             rsi_divergence = self._analyze_rsi_divergence_m15(m15_klines, screen1_result.trend_direction)
 
@@ -199,19 +223,20 @@ class Screen3SignalGenerator:
                                                          self.stochastic_periods['d'],
                                                          self.stochastic_periods['slowing'])
 
-            # Проверка условий для генерации сигнала
             has_trigger = bool(patterns or rsi_divergence)
 
             stochastic_signal = False
             if stochastic_data:
                 if screen1_result.trend_direction == "BULL":
                     stochastic_signal = (
-                            (stochastic_data["oversold"] or stochastic_data.get("k_line", 50) < self.stochastic_weak_oversold) and
+                            (stochastic_data["oversold"] or stochastic_data.get("k_line",
+                                                                                50) < self.stochastic_weak_oversold) and
                             stochastic_data["k_line"] > stochastic_data["d_line"]
                     )
                 else:
                     stochastic_signal = (
-                            (stochastic_data["overbought"] or stochastic_data.get("k_line", 50) > self.stochastic_weak_overbought) and
+                            (stochastic_data["overbought"] or stochastic_data.get("k_line",
+                                                                                  50) > self.stochastic_weak_overbought) and
                             stochastic_data["k_line"] < stochastic_data["d_line"]
                     )
 
@@ -231,22 +256,55 @@ class Screen3SignalGenerator:
 
             signal_type = "BUY" if screen1_result.trend_direction == "BULL" else "SELL"
 
-            # Цена входа - текущая цена из screen2
-            if screen2_result.best_zone:
-                entry_price = screen2_result.best_zone
+            # ========== ФАЗА 1.5.2: ИСПРАВЛЕНИЕ — ЗОНА ИМЕЕТ ПРИОРИТЕТ! ==========
+            zone_low = getattr(screen2_result, 'zone_low', 0)
+            zone_high = getattr(screen2_result, 'zone_high', 0)
+            best_zone = getattr(screen2_result, 'best_zone', 0)
+
+            # Максимальное допустимое расстояние до зоны (2%)
+            MAX_DISTANCE_TO_ZONE_PCT = 2.0
+
+            if zone_low > 0 and zone_high > 0 and real_current_price and real_current_price > 0:
+                if zone_low <= real_current_price <= zone_high:
+                    # ✅ Цена В ЗОНЕ — идеальный вход!
+                    entry_price = real_current_price
+                    logger.info(
+                        f"✅ {symbol}: цена {self._format_price(real_current_price)} В ЗОНЕ {self._format_price(zone_low)}-{self._format_price(zone_high)}")
+                else:
+                    # Цена вне зоны — проверяем расстояние
+                    zone_center = (zone_low + zone_high) / 2
+                    distance_to_zone = abs(real_current_price - zone_center) / zone_center * 100
+
+                    if distance_to_zone <= MAX_DISTANCE_TO_ZONE_PCT:
+                        # ⚠️ Цена близко к зоне — разрешаем вход
+                        entry_price = real_current_price
+                        logger.info(
+                            f"⚠️ {symbol}: цена {self._format_price(real_current_price)} близко к зоне ({distance_to_zone:.1f}% ≤ {MAX_DISTANCE_TO_ZONE_PCT}%)")
+                    else:
+                        # ❌ Цена далеко от зоны — ОТКАЗ!
+                        result.rejection_reason = f"Цена {self._format_price(real_current_price)} далеко от зоны {self._format_price(zone_low)}-{self._format_price(zone_high)} ({distance_to_zone:.1f}% > {MAX_DISTANCE_TO_ZONE_PCT}%)"
+                        logger.warning(f"❌ {symbol}: {result.rejection_reason}")
+                        return result
+            elif real_current_price is not None and real_current_price > 0:
+                # Нет зоны — используем текущую цену
+                entry_price = real_current_price
+                logger.info(f"📊 {symbol}: нет зоны, используем реальную цену {self._format_price(entry_price)}")
+            elif best_zone and best_zone > 0:
+                entry_price = best_zone
+                logger.info(f"📊 {symbol}: используем best_zone {self._format_price(entry_price)}")
             else:
                 entry_price = closes[-1] if closes else 0
+                logger.info(f"📊 {symbol}: fallback на M15 close {self._format_price(entry_price)}")
 
             if entry_price <= 0:
                 result.rejection_reason = "Некорректная цена входа"
                 return result
 
-            current_price = closes[-1] if closes else entry_price
+            # Сохраняем реальную цену
+            result.current_price_at_signal = entry_price
 
-            # Расчёт ATR
-            atr = self._calculate_atr(highs, lows, closes, self.atr_period, current_price)
+            atr = self._calculate_atr(highs, lows, closes, self.atr_period, entry_price)
 
-            # Расчёт SL
             stop_loss = self._calculate_stop_loss(
                 entry_price=entry_price,
                 signal_type=signal_type,
@@ -257,7 +315,17 @@ class Screen3SignalGenerator:
                 result.rejection_reason = "Не удалось рассчитать Stop Loss"
                 return result
 
-            # Расчёт TP с R/R ≥ 3:1
+            # Проверка SL относительно Entry
+            if signal_type == "BUY" and stop_loss >= entry_price:
+                result.rejection_reason = f"SL ({self._format_price(stop_loss)}) >= Entry ({self._format_price(entry_price)}) для BUY"
+                logger.warning(f"❌ {symbol}: {result.rejection_reason}")
+                return result
+
+            if signal_type == "SELL" and stop_loss <= entry_price:
+                result.rejection_reason = f"SL ({self._format_price(stop_loss)}) <= Entry ({self._format_price(entry_price)}) для SELL"
+                logger.warning(f"❌ {symbol}: {result.rejection_reason}")
+                return result
+
             risk = abs(entry_price - stop_loss)
             reward = risk * self.min_rr_ratio
 
@@ -271,26 +339,24 @@ class Screen3SignalGenerator:
             # Проверка корректности SL и TP
             if signal_type == "BUY":
                 if stop_loss >= entry_price:
-                    result.rejection_reason = f"SL >= Entry для BUY: {stop_loss:.6f} >= {entry_price:.6f}"
+                    result.rejection_reason = f"SL >= Entry для BUY"
                     return result
                 if take_profit <= entry_price:
-                    result.rejection_reason = f"TP <= Entry для BUY: {take_profit:.6f} <= {entry_price:.6f}"
+                    result.rejection_reason = f"TP <= Entry для BUY"
                     return result
             else:
                 if stop_loss <= entry_price:
-                    result.rejection_reason = f"SL <= Entry для SELL: {stop_loss:.6f} <= {entry_price:.6f}"
+                    result.rejection_reason = f"SL <= Entry для SELL"
                     return result
                 if take_profit >= entry_price:
-                    result.rejection_reason = f"TP >= Entry для SELL: {take_profit:.6f} >= {entry_price:.6f}"
+                    result.rejection_reason = f"TP >= Entry для SELL"
                     return result
 
-            # Проверка минимального расстояния
             min_sl_distance = entry_price * (self.min_sl_distance_absolute_pct / 100)
             if abs(stop_loss - entry_price) < min_sl_distance:
                 result.rejection_reason = f"SL слишком близко к Entry"
                 return result
 
-            # Проверка R/R
             rr_ratio = abs(take_profit - entry_price) / abs(stop_loss - entry_price)
             if rr_ratio < self.min_rr_ratio - 0.01:
                 result.rejection_reason = f"R/R {rr_ratio:.2f}:1 < {self.min_rr_ratio}:1"
@@ -328,7 +394,6 @@ class Screen3SignalGenerator:
             elif stochastic_signal:
                 trigger_pattern = "STOCHASTIC_CROSS"
 
-            # Заполняем результат
             result.signal_type = signal_type
             result.entry_price = self._round_price(entry_price)
             result.stop_loss = self._round_price(stop_loss)
@@ -351,7 +416,8 @@ class Screen3SignalGenerator:
                 "risk_pct": abs(stop_loss - entry_price) / entry_price * 100
             }
 
-            logger.info(f"✅ M15 сигнал сгенерирован: {signal_type} @ {entry_price:.6f}, R/R={rr_ratio:.2f}:1")
+            logger.info(
+                f"✅ M15 сигнал сгенерирован: {signal_type} @ {self._format_price(entry_price)}, R/R={rr_ratio:.2f}:1")
             return result
 
         except Exception as e:
@@ -360,7 +426,6 @@ class Screen3SignalGenerator:
             return result
 
     def _validate_price_range(self, price: float, symbol: str, market_data: Dict = None) -> bool:
-        """Проверка реалистичности цены"""
         try:
             if price <= 0:
                 return False
@@ -371,8 +436,8 @@ class Screen3SignalGenerator:
     def _calculate_stop_loss(self, entry_price: float, signal_type: str, atr: float,
                              resistance_level: Optional[float] = None,
                              support_level: Optional[float] = None) -> Optional[float]:
-        """Расчет Stop Loss для M15"""
-        logger.info(f"🔍 РАСЧЕТ STOP LOSS для {signal_type} @ {entry_price:.6f}, ATR={atr:.6f}")
+        logger.info(
+            f"🔍 РАСЧЕТ STOP LOSS для {signal_type} @ {self._format_price(entry_price)}, ATR={self._format_price(atr)}")
 
         if atr == 0 or atr is None:
             atr = entry_price * 0.005 if entry_price > 0 else 0.01
@@ -394,13 +459,11 @@ class Screen3SignalGenerator:
         if signal_type == "SELL":
             if stop_by_atr <= entry_price + min_distance:
                 stop_by_atr = entry_price + min_distance
-
             if stop_by_atr <= entry_price:
                 stop_by_atr = entry_price * (1 + self.sl_safety_buffer_pct / 100)
         else:
             if stop_by_atr >= entry_price - min_distance:
                 stop_by_atr = entry_price - min_distance
-
             if stop_by_atr >= entry_price:
                 stop_by_atr = entry_price * (1 - self.sl_safety_buffer_pct / 100)
 
@@ -442,13 +505,12 @@ class Screen3SignalGenerator:
         if distance_pct < self.min_sl_distance_absolute_pct * 0.8:
             return None
 
-        logger.info(f"✅ Stop Loss для {signal_type}: {stop_loss:.6f} (расстояние: {distance_pct:.3f}%)")
+        logger.info(f"✅ Stop Loss для {signal_type}: {self._format_price(stop_loss)} (расстояние: {distance_pct:.3f}%)")
         return stop_loss
 
     def _calculate_atr(self, high_prices: List[float], low_prices: List[float],
                        close_prices: List[float], period: int = None,
                        entry_price: float = None) -> float:
-        """Расчет Average True Range"""
         if period is None:
             period = self.atr_period
 
@@ -482,7 +544,6 @@ class Screen3SignalGenerator:
     def _calculate_stochastic(self, high_prices: List[float], low_prices: List[float],
                               close_prices: List[float], k_period: int = None,
                               d_period: int = None, slowing: int = None) -> Dict[str, Any]:
-        """Расчет стохастического осциллятора"""
         if k_period is None:
             k_period = self.stochastic_periods['k']
         if d_period is None:
@@ -542,7 +603,6 @@ class Screen3SignalGenerator:
             return {"k_line": 50, "d_line": 50, "oversold": False, "overbought": False}
 
     def _find_chart_patterns_m15(self, m15_klines: List, trend_direction: str) -> List[Dict]:
-        """Поиск графических паттернов на M15"""
         patterns = []
 
         try:
@@ -576,7 +636,6 @@ class Screen3SignalGenerator:
             return patterns
 
     def _analyze_pin_bar_m15(self, m15_klines: List, trend_direction: str) -> Optional[Dict]:
-        """Анализ Pin Bar паттерна"""
         try:
             if len(m15_klines) < 2:
                 return None
@@ -654,7 +713,6 @@ class Screen3SignalGenerator:
             return None
 
     def _analyze_engulfing_m15(self, m15_klines: List, trend_direction: str) -> Optional[Dict]:
-        """Анализ Engulfing паттерна"""
         try:
             if len(m15_klines) < 2:
                 return None
@@ -688,7 +746,8 @@ class Screen3SignalGenerator:
                     engulfing_ratio = current_body_size / prev_body_size
                     if engulfing_ratio >= engulfing_min_ratio:
                         confidence = min(
-                            self.engulfing_confidence_base + (engulfing_ratio - 1) * self.engulfing_confidence_multiplier,
+                            self.engulfing_confidence_base + (
+                                        engulfing_ratio - 1) * self.engulfing_confidence_multiplier,
                             self.engulfing_max_confidence
                         )
                         return {
@@ -710,7 +769,8 @@ class Screen3SignalGenerator:
                     engulfing_ratio = current_body_size / prev_body_size
                     if engulfing_ratio >= engulfing_min_ratio:
                         confidence = min(
-                            self.engulfing_confidence_base + (engulfing_ratio - 1) * self.engulfing_confidence_multiplier,
+                            self.engulfing_confidence_base + (
+                                        engulfing_ratio - 1) * self.engulfing_confidence_multiplier,
                             self.engulfing_max_confidence
                         )
                         return {
@@ -727,7 +787,6 @@ class Screen3SignalGenerator:
             return None
 
     def _analyze_morning_evening_star_m15(self, m15_klines: List, trend_direction: str) -> Optional[Dict]:
-        """Анализ Morning/Evening Star паттерна"""
         try:
             if len(m15_klines) < 3:
                 return None
@@ -786,7 +845,6 @@ class Screen3SignalGenerator:
             return None
 
     def _analyze_ma_crossover_m15(self, m15_klines: List, trend_direction: str) -> Optional[Dict]:
-        """Анализ MA кроссовера"""
         try:
             if len(m15_klines) < self.ma_crossover_min_candles:
                 return None
@@ -838,7 +896,6 @@ class Screen3SignalGenerator:
             return None
 
     def _analyze_ma_bounce_m15(self, m15_klines: List, trend_direction: str) -> Optional[Dict]:
-        """Анализ отскока от MA"""
         try:
             if len(m15_klines) < 10:
                 return None
@@ -892,7 +949,6 @@ class Screen3SignalGenerator:
             return None
 
     def _analyze_rsi_divergence_m15(self, m15_klines: List, trend_direction: str) -> Optional[Dict]:
-        """Анализ RSI дивергенции"""
         try:
             if len(m15_klines) < 15:
                 return None
@@ -937,7 +993,6 @@ class Screen3SignalGenerator:
             return None
 
     def _calculate_rsi(self, prices: List[float], period: int = None) -> List[float]:
-        """Расчет RSI"""
         if period is None:
             period = self.rsi_period
 

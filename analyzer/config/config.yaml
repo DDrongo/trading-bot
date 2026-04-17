@@ -1,15 +1,4 @@
 analysis:
-  symbols:
-  - BTCUSDT
-  - ETHUSDT
-  - SOLUSDT
-  - BNBUSDT
-  - XRPUSDT
-  - ADAUSDT
-  - DOGEUSDT
-  - AVAXUSDT
-  - DOTUSDT
-  - LINKUSDT
   adx_thresholds:
     moderate: 18.0
     sideways: 0.0
@@ -62,7 +51,7 @@ analysis:
   min_24h_volume_usd: 5000000
   min_price: 0.1
   min_rr_ratio: 2.0
-  monitoring_interval_seconds: 60
+  monitoring_interval_seconds: 120
   orchestration:
     continuous_analysis_interval: 15
     continuous_max_concurrent: 3
@@ -73,7 +62,7 @@ analysis:
       4h: 50
       5m: 50
     log_symbols_limit: 10
-    max_concurrent_analysis: 5
+    max_concurrent_analysis: 3
     min_timeframes_for_analysis: 3
   patterns:
     engulfing_confidence_base: 0.6
@@ -120,8 +109,8 @@ analysis:
     max_sl_percent: 50.0
     max_tp_ceiling_pct: 1.2
     max_tp_percent: 20.0
-    min_sl_distance_absolute_pct: 0.5
-    min_sl_distance_pct: 0.5
+    min_sl_distance_absolute_pct: 1.5
+    min_sl_distance_pct: 1.5
     min_tp_distance_pct: 1.5
     min_tp_floor_pct: 0.97
     min_tp_percent: 15.0
@@ -204,11 +193,11 @@ analysis:
     zone_match_tolerance_pct: 1.0
   h4_filter:
     enabled: true
-    adx_threshold: 25
+    adx_threshold: 20
   zone_side_check:
     enabled: true
   range_filter:
-    enabled: true
+    enabled: false
     lookback: 50
     min_width_pct: 2.0
     max_width_pct: 10.0
@@ -219,10 +208,10 @@ api:
   cache:
     ttl_seconds: 60
   exchange: bybit
-  rate_limit: 20
+  rate_limit: 10
   recv_window: 5000
-  request_delay: 0.2
-  max_concurrent_requests: 5
+  request_delay: 0.6
+  max_concurrent_requests: 3
   requests:
     default_order_type: GTC
     max_kline_limit: 1000
@@ -452,23 +441,51 @@ display:
   table_style: unicode
   colors_enabled: true
   max_symbols_per_page: 50
-
-# ----------------------------------------------------------------------------
-# НАСТРОЙКИ РЕЖИМОВ ТОРГОВЛИ (ФАЗА 1.5.0)
-# ----------------------------------------------------------------------------
-# trading_mode: "pro"   # Полный трёхэкранный анализ (в разработке, фаза 1.4.x)
-trading_mode: "light"   # Упрощённый режим на EMA и откатах (фаза 1.5.0)
-
-# Настройки для УПРОЩЁННОГО РЕЖИМА (Light)
+trading_mode: pro
 light_trader:
-  enabled: true
-  # Параметры тренда D1
+  enabled: false
   d1_ema_fast: 20
   d1_ema_slow: 50
-  # Параметры отката H4
   h4_ema: 20
-  zone_proximity_pct: 0.5      # 0.5% отклонения от EMA20
-  # Параметры входа
+  zone_proximity_pct: 0.5
   risk_reward_ratio: 2.0
-  min_patterns: ["ENGULFING", "PIN_BAR", "MORNING_STAR"]
+  min_patterns:
+  - ENGULFING
+  - PIN_BAR
+  - MORNING_STAR
   expiration_hours: 3
+# ========== ФАЗА 1.5.1: БЭКТЕСТИНГ ==========
+backtest:
+  enabled: true
+  # Настройки исторических данных
+  historical_data:
+    w1_years: 2
+    d1_years: 1
+    cache_ttl_hours: 24
+  # Настройки уровней
+  levels:
+    touch_tolerance_pct: 0.5
+    min_touches: 2
+    very_strong_touches: 5
+    strong_touches: 3
+  # Настройки бэктеста
+  execution:
+    analyze_interval_candles: 4  # Каждые 4 свечи M15 = 1 час
+    min_history_candles: 100
+  # Сохранение результатов
+  save_results: true
+  results_retention_days: 90
+  # ========== ФАЗА 1.5.1: ИСТОРИЧЕСКИЕ ДАННЫЕ (ОТДЕЛЬНАЯ БД) ==========
+historical_data:
+  # Путь к отдельной БД для исторических данных
+  # НИКОГДА НЕ УДАЛЯТЬ ЭТОТ ФАЙЛ при сбросе торговой истории!
+  db_path: "data/historical.db"
+
+  # Настройки сбора исторических уровней
+  levels:
+    w1_years: 2
+    d1_years: 1
+    touch_tolerance_pct: 0.5
+    min_touches: 2
+    very_strong_touches: 5
+    strong_touches: 3
