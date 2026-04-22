@@ -1,4 +1,4 @@
-# analyzer/core/three_screen_analyzer.py (ПОЛНОСТЬЮ - ФАЗА 1.5.2)
+# analyzer/core/three_screen_analyzer.py (ПОЛНОСТЬЮ - ФАЗА 2.0 SMC)
 """
 🎯 THREE SCREEN ANALYZER - Координатор трёхэкранного анализа
 
@@ -10,12 +10,18 @@
 - ДОБАВЛЕНО: отслеживание пробоев в WATCH
 
 ФАЗА 1.5.2:
-- 🆕 Универсальный генератор комментариев для WATCH и M15
-- 🆕 Отображение исторических уровней, фибоначчи, confluence
-- 🆕 Полный обучающий комментарий для всех типов сигналов
-- 🆕 Добавлены дата/время в H4 анализ (импульс/коррекция)
-- 🆕 Исправлена терминология: «Позиция цены» вместо «Текущая позиция»
-- 🆕 Исправлено противоречие: «● В ЗОНЕ» и «ожидаем входа в зону»
+- Универсальный генератор комментариев для WATCH и M15
+- Отображение исторических уровней, фибоначчи, confluence
+- Полный обучающий комментарий для всех типов сигналов
+- Добавлены дата/время в H4 анализ (импульс/коррекция)
+- Исправлена терминология: «Позиция цены» вместо «Текущая позиция»
+
+ФАЗА 2.0 - SMC (Smart Money Concepts):
+- 🆕 Обновлён комментарий для отображения FVG зон
+- 🆕 Обновлён комментарий для отображения пулов ликвидности
+- 🆕 Отображение типа входа (SNIPER/TREND/LEGACY)
+- 🆕 Отображение информации о Liquidity Grab
+- 🆕 Передача SMC данных в screen3
 """
 
 import logging
@@ -60,9 +66,13 @@ class ThreeScreenAnalyzer:
         self._initialized = False
         self._analysis_start_time = None
 
-        logger.info(f"✅ ThreeScreenAnalyzer создан (Фаза 1.5.2) — Pro режим активирован")
+        # ФАЗА 2.0: SMC данные для комментария
+        self._last_fvg_zones = []
+        self._last_liquidity_pools = []
+
+        logger.info(f"✅ ThreeScreenAnalyzer создан (Фаза 2.0 SMC) — Pro режим активирован")
         logger.info(f"   Единый источник цены: DataProvider")
-        logger.info(f"   🆕 Универсальный генератор комментариев")
+        logger.info(f"   🆕 SMC комментарии: FVG + Liquidity Pools")
 
     def _format_price(self, price: float) -> str:
         """Унифицированное форматирование цены"""
@@ -186,7 +196,7 @@ class ThreeScreenAnalyzer:
 
     async def analyze_symbol(self, symbol: str) -> Optional[ThreeScreenAnalysis]:
         """
-        Анализ символа по трёхэкранной методологии
+        Анализ символа по трёхэкранной методологии (Фаза 2.0 SMC)
         """
         logger.info(f"🚀 Начинаем Pro анализ для {symbol}")
 
@@ -214,9 +224,14 @@ class ThreeScreenAnalyzer:
             # Шаг 2: Screen 2 (H4 зоны входа) - передаём реальную цену
             screen2_result = await self._analyze_screen2(symbol, klines_data, screen1_result, real_price)
 
-            # Шаг 3: Screen 3 (M15 сигналы) - передаём реальную цену
-            screen3_result = await self._analyze_screen3(symbol, klines_data, screen1_result, screen2_result,
-                                                         real_price)
+            # Сохраняем SMC данные для комментария
+            self._last_fvg_zones = getattr(screen2_result, 'fvg_zones', [])
+            self._last_liquidity_pools = getattr(screen2_result, 'liquidity_pools', [])
+
+            # Шаг 3: Screen 3 (M15 сигналы) - передаём реальную цену и SMC данные
+            screen3_result = await self._analyze_screen3(
+                symbol, klines_data, screen1_result, screen2_result, real_price
+            )
 
             # Сохраняем тренд в БД если прошёл фильтр
             if screen1_result.passed:
@@ -239,7 +254,7 @@ class ThreeScreenAnalyzer:
 
     async def _analyze_screen2(self, symbol: str, klines_data: Dict,
                                screen1_result: Screen1Result, real_price: float) -> Screen2Result:
-        """Запуск анализа второго экрана с реальной ценой"""
+        """Запуск анализа второго экрана с SMC (Фаза 2.0)"""
         h4_klines = klines_data.get('4h', [])
 
         def convert_klines(klines_list):
@@ -259,6 +274,7 @@ class ThreeScreenAnalyzer:
 
         h4_data = convert_klines(h4_klines)
 
+        # Используем SMC анализ
         result = self.screen2_analyzer.analyze(
             h4_data, screen1_result.trend_direction, real_price, symbol
         )
@@ -273,6 +289,13 @@ class ThreeScreenAnalyzer:
         screen2.rejection_reason = result.get('reason', '')
         screen2.best_zone = (screen2.zone_low + screen2.zone_high) / 2 if screen2.zone_low > 0 else 0
 
+        # ФАЗА 2.0: Сохраняем SMC данные в screen2_result
+        screen2.entry_type = result.get('entry_type', 'LEGACY')
+        screen2.fvg_zones = result.get('fvg_zones', [])
+        screen2.liquidity_pools = result.get('liquidity_pools', [])
+        screen2.selected_fvg = result.get('selected_fvg', None)
+        screen2.selected_liquidity_pool = result.get('selected_liquidity_pool', None)
+
         # Сохраняем дополнительные данные для обучающего комментария
         screen2.h4_analysis = result.get('h4_analysis', {})
         screen2.support_levels = result.get('support_levels', [])
@@ -283,7 +306,8 @@ class ThreeScreenAnalyzer:
 
         if screen2.passed:
             logger.info(
-                f"✅ {symbol}: Screen 2 пройден (score={screen2.screen2_score}/5, зона={self._format_price(screen2.zone_low)}-{self._format_price(screen2.zone_high)})")
+                f"✅ {symbol}: Screen 2 пройден (score={screen2.screen2_score}/5, "
+                f"тип={screen2.entry_type}, зона={self._format_price(screen2.zone_low)}-{self._format_price(screen2.zone_high)})")
 
         return screen2
 
@@ -453,7 +477,7 @@ class ThreeScreenAnalyzer:
                                screen1_result: Screen1Result,
                                screen2_result: Screen2Result,
                                real_price: float) -> Screen3Result:
-        """Запуск анализа третьего экрана с реальной ценой"""
+        """Запуск анализа третьего экрана с SMC данными (Фаза 2.0)"""
 
         # Проверка дубликатов перед генерацией
         from .signal_repository import signal_repository
@@ -500,14 +524,35 @@ class ThreeScreenAnalyzer:
         m15_converted = convert_klines(m15_klines)
         m5_converted = convert_klines(m5_klines)
 
-        # Передаём реальную цену в Screen3
+        # ФАЗА 2.0: Передаём SMC данные в Screen3
+        from analyzer.core.analyst import FVGDetector, LiquidityScanner
+
+        fvg_detector = FVGDetector()
+        liquidity_scanner = LiquidityScanner()
+
+        # Конвертируем H4 данные для детекторов
+        h4_klines = klines_data.get('4h', [])
+        h4_converted = []
+        for k in h4_klines:
+            h4_converted.append({
+                'open': float(k[1]),
+                'high': float(k[2]),
+                'low': float(k[3]),
+                'close': float(k[4]),
+                'timestamp': k[0]
+            })
+
         result = self.screen3_analyzer.generate_signal(
-            symbol, m15_converted, m5_converted, screen1_result, screen2_result, real_price
+            symbol, m15_converted, m5_converted, screen1_result, screen2_result, real_price,
+            liquidity_scanner=liquidity_scanner,
+            fvg_detector=fvg_detector
         )
 
         if result.passed:
             logger.info(
-                f"✅ {symbol}: Screen 3 пройден! {result.signal_type} @ {self._format_price(result.entry_price)}")
+                f"✅ {symbol}: Screen 3 пройден! {result.signal_type} @ {self._format_price(result.entry_price)} "
+                f"[{result.entry_type}]"
+            )
 
         return result
 
@@ -603,7 +648,7 @@ class ThreeScreenAnalyzer:
                 logger.info(
                     f"📊 {symbol}: Entry скорректирована с {self._format_price(old_entry)} на {self._format_price(real_price)}")
 
-            # Генерируем обучающий комментарий
+            # Генерируем обучающий комментарий (Фаза 2.0 с SMC)
             learning_comment = self._generate_full_analysis_description(
                 symbol, screen1, screen2, screen3
             )
@@ -627,7 +672,13 @@ class ThreeScreenAnalyzer:
                             'signal_subtype': 'M15',
                             'order_type': 'MARKET',
                             'expiration_time': screen3.expiration_time.isoformat() if screen3.expiration_time else None,
-                            'learning_comment': learning_comment
+                            'learning_comment': learning_comment,
+                            # ФАЗА 2.0: SMC данные
+                            'entry_type': getattr(screen3, 'entry_type', 'LEGACY'),
+                            'position_multiplier': getattr(screen3, 'position_multiplier', 1.0),
+                            'liquidity_grabbed': getattr(screen3, 'liquidity_grabbed', False),
+                            'fvg_present': getattr(screen3, 'fvg_present', False),
+                            'grab_price': getattr(screen3, 'grab_price', None)
                         },
                         'three_screen_analyzer'
                     )
@@ -643,7 +694,10 @@ class ThreeScreenAnalyzer:
             screen2: Screen2Result,
             screen3: Screen3Result = None
     ) -> str:
-        """Генерация полного описания для обучающей системы (ФАЗА 1.5.2)"""
+        """
+        Генерация полного описания для обучающей системы (ФАЗА 2.0 SMC)
+        Включает FVG зоны, пулы ликвидности, тип входа
+        """
 
         # D1 тренд
         d1_trend = screen1.trend_direction
@@ -685,7 +739,6 @@ class ThreeScreenAnalyzer:
   Фаза:            {phase}
 """
             if impulse:
-                # Добавляем дату/время для импульса
                 start_time = impulse.get('start_time', '?')
                 end_time = impulse.get('end_time', '?')
                 candles = impulse.get('candles_count', '?')
@@ -697,7 +750,6 @@ class ThreeScreenAnalyzer:
     Изменение:     {impulse.get('change_pct', 0):+.2f}%
 """
             if correction:
-                # Добавляем дату/время для коррекции
                 start_time = correction.get('start_time', '?')
                 candles = correction.get('candles_count', '?')
 
@@ -708,11 +760,74 @@ class ThreeScreenAnalyzer:
     Изменение:     {correction.get('change_pct', 0):+.2f}%
 """
 
+        # ========== ФАЗА 2.0: FVG ЗОНЫ ==========
+        fvg_zones = getattr(screen2, 'fvg_zones', [])
+        if fvg_zones:
+            description += f"""
+🕳️ FVG АНАЛИЗ (Fair Value Gaps)
+───────────────────────────────────────────────────────────────
+"""
+            for i, fvg in enumerate(fvg_zones[:5], 1):
+                fvg_type = "БЫЧИЙ" if fvg.get('type') == 'bullish' else "МЕДВЕЖИЙ"
+                age = fvg.get('age', '?')
+                strength = fvg.get('strength', 'WEAK')
+                strength_icon = "💪" if strength == "STRONG" else "📊" if strength == "NORMAL" else "🕰️"
+
+                description += f"  {i}. {fvg_type} FVG: {self._format_price(fvg.get('low', 0))} - {self._format_price(fvg.get('high', 0))}\n"
+                description += f"     {strength_icon} Возраст: {age} свечей, сила: {strength}\n"
+
+        # ========== ФАЗА 2.0: ПУЛЫ ЛИКВИДНОСТИ ==========
+        liquidity_pools = getattr(screen2, 'liquidity_pools', [])
+        if liquidity_pools:
+            description += f"""
+💧 ЗОНЫ ЛИКВИДНОСТИ (Liquidity Pools)
+───────────────────────────────────────────────────────────────
+"""
+            for i, pool in enumerate(liquidity_pools[:5], 1):
+                pool_type = "SELL_SIDE (стопы лонгистов)" if pool.get(
+                    'type') == 'SELL_SIDE' else "BUY_SIDE (стопы шортистов)"
+                touches = pool.get('touches', '?')
+                strength = pool.get('strength', 'NORMAL')
+
+                description += f"  {i}. {pool_type}\n"
+                description += f"     Уровень: {self._format_price(pool.get('price', 0))}, касаний: {touches}, сила: {strength}\n"
+
+        # ========== ФАЗА 2.0: ТИП ВХОДА ==========
+        entry_type = getattr(screen2, 'entry_type', 'LEGACY')
+        entry_type_icon = "🎯" if entry_type == "SNIPER" else "📈" if entry_type == "TREND" else "📊"
+
+        description += f"""
+🎯 ТАКТИКА ВХОДА
+───────────────────────────────────────────────────────────────
+  Тип:            {entry_type_icon} {entry_type}
+"""
+
+        if entry_type == "SNIPER":
+            selected_fvg = getattr(screen2, 'selected_fvg', None)
+            selected_pool = getattr(screen2, 'selected_liquidity_pool', None)
+
+            description += f"""  Условие:       Ждём прокол пула ликвидности и возврат в FVG
+  Ожидаемый паттерн: PIN_BAR
+"""
+            if selected_pool:
+                description += f"  Пул ликвидности: {self._format_price(selected_pool.get('price', 0))}\n"
+            if selected_fvg:
+                description += f"  FVG зона:      {self._format_price(selected_fvg.get('low', 0))} - {self._format_price(selected_fvg.get('high', 0))}\n"
+
+        elif entry_type == "TREND":
+            description += f"""  Условие:       Цена в FVG зоне
+  Ожидаемый паттерн: ENGULFING
+  Размер позиции: 50% (половинный)
+"""
+        else:
+            description += f"""  Условие:       Стандартная логика (исторические уровни)
+  Размер позиции: 75% (стандартный)
+"""
+
         # Исторические уровни
         support_levels = getattr(screen2, 'support_levels', [])
         resistance_levels = getattr(screen2, 'resistance_levels', [])
 
-        # Фильтруем только исторические уровни
         hist_supports = [s for s in support_levels if s.get('source') == 'HISTORICAL']
         hist_resistances = [r for r in resistance_levels if r.get('source') == 'HISTORICAL']
 
@@ -825,8 +940,12 @@ class ThreeScreenAnalyzer:
 
         # M15 сигнал (если есть)
         if screen3 and screen3.passed:
+            # ФАЗА 2.0: Отображаем информацию о Liquidity Grab
+            liquidity_grabbed = getattr(screen3, 'liquidity_grabbed', False)
+            grab_price = getattr(screen3, 'grab_price', None)
+
             description += f"""
-⚡ M15 СИГНАЛ
+⚡ M15 СИГНАЛ [{entry_type}]
 ───────────────────────────────────────────────────────────────
   Направление:     {screen3.signal_type}
   Паттерн:         {screen3.trigger_pattern}
@@ -835,6 +954,15 @@ class ThreeScreenAnalyzer:
   Stop Loss:       {self._format_price(screen3.stop_loss)}
   Take Profit:     {self._format_price(screen3.take_profit)}
   R/R:             {screen3.indicators.get('risk_reward_ratio', 0):.2f}:1
+  Размер позиции:  {getattr(screen3, 'position_multiplier', 1.0):.0%}
+"""
+            if liquidity_grabbed and grab_price:
+                description += f"""
+  💧 Liquidity Grab: ДА (прокол {self._format_price(grab_price)})
+"""
+            else:
+                description += f"""
+  💧 Liquidity Grab: НЕТ
 """
         else:
             # WATCH статус с правильной логикой

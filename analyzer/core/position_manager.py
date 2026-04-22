@@ -1,4 +1,4 @@
-# analyzer/core/position_manager.py (ПОЛНОСТЬЮ - ФАЗА 1.4.1)
+# analyzer/core/position_manager.py (ПОЛНОСТЬЮ - ФАЗА 2.0 SMC)
 """
 🎯 POSITION MANAGER - Управление позициями (с риск-менеджментом)
 
@@ -12,6 +12,13 @@
 ФАЗА 1.4.1:
 - Увеличен slippage до 2.0%
 - Улучшено логирование причин REJECTED
+
+ФАЗА 2.0 - SMC (Smart Money Concepts):
+- 🆕 Учёт entry_type при расчёте размера позиции
+- 🆕 Sniper (1.0) → полный размер позиции
+- 🆕 Trend (0.5) → половинный размер позиции
+- 🆕 Legacy (0.75) → 75% размера позиции
+- 🆕 Логирование множителя позиции
 """
 
 import asyncio
@@ -49,11 +56,20 @@ class PositionManager:
         self.m15_config = analysis_config.get('signal_types', {}).get('m15', {})
         self.watch_config = analysis_config.get('signal_types', {}).get('watch', {})
 
-        # ФАЗА 1.4.1: увеличен slippage до 2.0%
         self.max_slippage_pct = self.m15_config.get('max_slippage_pct', 2.0)
 
         self.min_risk_distance_pct = 0.1
         self.risk_per_trade_pct = self.pos_config.get('position_sizing', {}).get('risk_per_trade_pct', 2.0)
+
+        self.position_multipliers = {
+            'SNIPER': 1.0,
+            'TREND': 0.75,
+            'LEGACY': 0.5
+        }
+        logger.info(f"🎯 Position Manager (Фаза 2.0 SMC)")
+        logger.info(f"   Множители позиции: SNIPER={self.position_multipliers['SNIPER']:.0%}, "
+                    f"TREND={self.position_multipliers['TREND']:.0%}, "
+                    f"LEGACY={self.position_multipliers['LEGACY']:.0%}")
 
         self.paper_account = PaperAccount(config)
         self.open_positions: Dict[int, PaperPosition] = {}
@@ -185,7 +201,23 @@ class PositionManager:
             expiration_time = signal_data.get('expiration_time')
             leverage = signal_data.get('leverage', 10)
 
+            # ФАЗА 2.0: Получаем entry_type и множитель позиции
+            entry_type = signal_data.get('entry_type', 'LEGACY')
+            position_multiplier = signal_data.get('position_multiplier',
+                                                  self.position_multipliers.get(entry_type, 0.75))
+            liquidity_grabbed = signal_data.get('liquidity_grabbed', False)
+            fvg_present = signal_data.get('fvg_present', False)
+            grab_price = signal_data.get('grab_price', None)
+
             logger.info(f"🔔 Position Manager: получен сигнал {signal_id} для {symbol}")
+            logger.info(f"   Тип входа: {entry_type}, множитель: {position_multiplier:.0%}")
+            if liquidity_grabbed:
+                if grab_price:
+                    logger.info(f"   💧 Liquidity Grab: ДА (прокол {grab_price:.6f})")
+                else:
+                    logger.info(f"   💧 Liquidity Grab: ДА")
+            if fvg_present:
+                logger.info(f"   🕳️ FVG: ДА")
 
             if expiration_time and isinstance(expiration_time, str):
                 expiration_time = datetime.fromisoformat(expiration_time)
@@ -196,6 +228,7 @@ class PositionManager:
 
             logger.info(f"{'=' * 60}")
             logger.info(f"💰 ОТКРЫТИЕ ПОЗИЦИИ #{signal_id} ({symbol})")
+            logger.info(f"   Тип входа: {entry_type} (множитель {position_multiplier:.0%})")
             logger.info(f"{'=' * 60}")
             logger.info(f"   Направление: {direction}")
             logger.info(f"   Планируемый вход: {planned_entry:.6f}")
@@ -206,8 +239,7 @@ class PositionManager:
 
             if deviation_pct > self.max_slippage_pct:
                 logger.warning(f"⚠️ Отклонение {deviation_pct:.2f}% > {self.max_slippage_pct}%")
-                logger.warning(
-                    f"   Причина REJECTED: slippage превышен (Entry={planned_entry:.6f}, Real={fill_price:.6f}, diff={deviation_pct:.2f}%)")
+                logger.warning(f"   Причина REJECTED: slippage превышен")
                 await signal_repository.update_signal_status(signal_id, 'REJECTED')
                 return
 
@@ -225,41 +257,61 @@ class PositionManager:
             logger.info(f"   SL (пересчитан): {stop_loss:.6f}")
             logger.info(f"   TP (пересчитан): {take_profit:.6f}")
 
-            # ========== РАСЧЁТ РАЗМЕРА ПОЗИЦИИ ==========
+            # ========== РАСЧЁТ РАЗМЕРА ПОЗИЦИИ С УЧЁТОМ ENTRY_TYPE ==========
             balance = await self.paper_account.get_balance()
-            margin_target = balance * (self.risk_per_trade_pct / 100.0)
 
-            logger.info(f"\n📊 РАСЧЁТ РАЗМЕРА ПОЗИЦИИ:")
+            # Базовый риск в USDT (2% от депозита по умолчанию)
+            base_risk_amount = balance * (self.risk_per_trade_pct / 100.0)
+
+            # Применяем множитель в зависимости от типа входа
+            risk_amount = base_risk_amount * position_multiplier
+
+            logger.info(f"\n📊 РАСЧЁТ РАЗМЕРА ПОЗИЦИИ (SMC):")
             logger.info(f"   Баланс: {balance:.2f} USDT")
-            logger.info(f"   Целевой залог: {margin_target:.2f} USDT ({self.risk_per_trade_pct}% от депозита)")
+            logger.info(f"   Базовый риск: {base_risk_amount:.2f} USDT ({self.risk_per_trade_pct}% от депозита)")
+            logger.info(f"   Тип входа: {entry_type} (множитель {position_multiplier:.0%})")
+            logger.info(f"   Итоговый риск: {risk_amount:.2f} USDT")
 
-            position_value = margin_target * leverage
+            # Рассчитываем расстояние до SL
+            risk_distance = abs(fill_price - stop_loss)
+            if risk_distance <= 0:
+                logger.error(f"❌ risk_distance = 0, невозможно рассчитать позицию")
+                await signal_repository.update_signal_status(signal_id, 'REJECTED')
+                return
+
+            # Количество монет = риск / расстояние до SL
+            quantity = risk_amount / risk_distance
+            logger.info(f"   Количество монет (расчётное): {quantity:.6f}")
+
+            # Применяем плечо
+            position_value = quantity * fill_price
+            margin = position_value / leverage
+
             logger.info(f"   Стоимость позиции: {position_value:.2f} USDT")
+            logger.info(f"   Залог (маржа): {margin:.2f} USDT")
+            logger.info(f"   Плечо: {leverage}x")
 
-            quantity = position_value / fill_price
-            logger.info(f"   Количество монет (расчётное): {quantity:.2f}")
-
+            # Округляем количество
             quantity = self._round_quantity(quantity, symbol)
-            logger.info(f"   Количество монет (округлённое): {quantity:.4f}")
 
             if quantity > self.max_quantity:
                 quantity = self.max_quantity
-                logger.warning(f"   ⚠️ Ограничено максимумом: {quantity:.2f}")
+                logger.warning(f"   ⚠️ Ограничено максимумом: {quantity:.6f}")
             if quantity < self.min_quantity:
                 quantity = self.min_quantity
-                logger.warning(f"   ⚠️ Увеличено до минимума: {quantity:.4f}")
+                logger.warning(f"   ⚠️ Увеличенно до минимума: {quantity:.6f}")
 
+            # Пересчитываем фактический риск
             actual_position_value = quantity * fill_price
             actual_margin = actual_position_value / leverage
-            risk_distance = abs(fill_price - stop_loss)
             actual_risk = quantity * risk_distance
-            risk_pct = (actual_risk / balance) * 100
+            actual_risk_pct = (actual_risk / balance) * 100
 
             logger.info(f"\n📊 ИТОГОВЫЙ РАСЧЁТ:")
-            logger.info(f"   Количество: {quantity:.4f} {symbol}")
+            logger.info(f"   Количество: {quantity:.6f} {symbol}")
             logger.info(f"   Стоимость позиции: {actual_position_value:.2f} USDT")
             logger.info(f"   Залог: {actual_margin:.2f} USDT")
-            logger.info(f"   Риск: {actual_risk:.2f} USDT ({risk_pct:.2f}%)")
+            logger.info(f"   Риск: {actual_risk:.2f} USDT ({actual_risk_pct:.2f}%)")
 
             if actual_margin > balance:
                 logger.error(f"❌ Залог {actual_margin:.2f} > баланс {balance:.2f}")
@@ -269,6 +321,16 @@ class PositionManager:
 
             await signal_repository.update_position_size(signal_id, quantity)
             await signal_repository.update_leverage(signal_id, leverage)
+            await signal_repository.update_entry_type(signal_id, entry_type)
+
+            # ========== РАСЧЁТ КОМИССИЙ ==========
+            commission_rate = 0.0006  # 0.06% (типичная комиссия Bybit для фьючерсов)
+            commission_open = actual_position_value * commission_rate
+            commission_close = actual_position_value * commission_rate  # приблизительно
+
+            logger.info(f"\n💰 КОМИССИИ:")
+            logger.info(f"   За открытие: {commission_open:.4f} USDT ({commission_rate * 100:.2f}%)")
+            logger.info(f"   За закрытие: {commission_close:.4f} USDT ({commission_rate * 100:.2f}%)")
 
             try:
                 position = await self.paper_account.open_position(
@@ -294,13 +356,16 @@ class PositionManager:
                 'leverage': leverage, 'margin': position.margin,
                 'position_value': position.position_value, 'stop_loss': stop_loss,
                 'take_profit': take_profit, 'opened_at': utc_now().isoformat(),
-                'status': 'OPEN', 'order_type': 'MARKET', 'fill_price': fill_price
+                'status': 'OPEN', 'order_type': 'MARKET', 'fill_price': fill_price,
+                'commission_open': commission_open, 'commission_close': commission_close
             }
             await trade_repository.save_trade(trade_data)
 
             logger.info(f"\n✅ ПОЗИЦИЯ #{signal_id} ОТКРЫТА!")
-            logger.info(f"   {symbol} {direction} {quantity:.4f} монет @ {fill_price:.6f}")
+            logger.info(f"   Тип входа: {entry_type} (множитель {position_multiplier:.0%})")
+            logger.info(f"   {symbol} {direction} {quantity:.6f} монет @ {fill_price:.6f}")
             logger.info(f"   Залог: {position.margin:.2f} USDT")
+            logger.info(f"   Комиссия за открытие: {commission_open:.4f} USDT")
             logger.info(f"   Новый баланс: {await self.paper_account.get_balance():.2f} USDT")
             logger.info(f"{'=' * 60}")
 
@@ -310,7 +375,9 @@ class PositionManager:
                     'signal_id': signal_id, 'symbol': symbol, 'direction': direction,
                     'entry_price': fill_price, 'quantity': quantity, 'leverage': leverage,
                     'margin': position.margin, 'stop_loss': stop_loss,
-                    'take_profit': take_profit, 'order_type': 'MARKET', 'fill_price': fill_price
+                    'take_profit': take_profit, 'order_type': 'MARKET', 'fill_price': fill_price,
+                    'entry_type': entry_type, 'position_multiplier': position_multiplier,
+                    'commission_open': commission_open, 'commission_close': commission_close
                 },
                 'position_manager'
             )
@@ -376,7 +443,18 @@ class PositionManager:
     def _is_expired(self, position: PaperPosition) -> bool:
         if not position.expiration_time:
             return False
-        return now() >= position.expiration_time
+
+        from analyzer.core.time_utils import utc_now
+        from datetime import datetime
+
+        if isinstance(position.expiration_time, str):
+            # Формат: '2026-04-20T13:07:13.485353' или '2026-04-20 13:07:13'
+            exp_str = position.expiration_time.replace('T', ' ').split('.')[0]
+            exp_time = datetime.strptime(exp_str, '%Y-%m-%d %H:%M:%S')
+        else:
+            exp_time = position.expiration_time
+
+        return utc_now() >= exp_time
 
     async def _close_position(self, signal_id: int, reason: str, close_price: float):
         try:
@@ -384,10 +462,17 @@ class PositionManager:
             if not position:
                 return
 
+            # Рассчитываем комиссию за закрытие
+            commission_rate = 0.0006
+            commission_close = position.position_value * commission_rate
+
             if position.direction == 'BUY':
                 pnl = (close_price - position.entry_price) * position.quantity
             else:
                 pnl = (position.entry_price - close_price) * position.quantity
+
+            # Вычитаем комиссию за закрытие из PnL
+            pnl -= commission_close
 
             closed_info = await self.paper_account.close_position(signal_id, close_price, pnl, reason)
 
@@ -399,11 +484,24 @@ class PositionManager:
                 if trade and trade.get('id'):
                     await trade_repository.update_trade(
                         trade_id=trade['id'], close_price=close_price, pnl=closed_info['pnl'],
-                        pnl_percent=closed_info['pnl_percent'], close_reason=reason, closed_at=utc_now()
+                        pnl_percent=closed_info['pnl_percent'], close_reason=reason,
+                        closed_at=utc_now(), commission_close=commission_close
                     )
 
-                await event_bus.publish(...)
-                logger.info(f"✅ Позиция #{signal_id} закрыта: {reason}, PnL: {closed_info['pnl']:+.2f}")
+                await event_bus.publish(
+                    EventType.POSITION_CLOSED,
+                    {
+                        'signal_id': signal_id,
+                        'symbol': position.symbol,
+                        'close_price': close_price,
+                        'pnl': closed_info['pnl'],
+                        'close_reason': reason,
+                        'commission_close': commission_close
+                    },
+                    'position_manager'
+                )
+                logger.info(
+                    f"✅ Позиция #{signal_id} закрыта: {reason}, PnL: {closed_info['pnl']:+.2f}, комиссия: {commission_close:.4f}")
         except Exception as e:
             logger.error(f"❌ Ошибка закрытия: {e}")
 

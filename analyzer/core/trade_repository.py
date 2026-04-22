@@ -31,7 +31,6 @@ class TradeRepository:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
             async with aiosqlite.connect(self.db_path) as conn:
-                # Создаём таблицу trades
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS trades (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +48,8 @@ class TradeRepository:
                         pnl REAL DEFAULT 0,
                         pnl_percent REAL DEFAULT 0,
                         commission REAL DEFAULT 0,
+                        commission_open REAL DEFAULT 0,
+                        commission_close REAL DEFAULT 0,
                         close_reason TEXT,
                         opened_at TIMESTAMP NOT NULL,
                         closed_at TIMESTAMP,
@@ -59,7 +60,6 @@ class TradeRepository:
                     )
                 """)
 
-                # Добавляем недостающие колонки
                 cursor = await conn.execute("PRAGMA table_info(trades)")
                 columns = [col[1] for col in await cursor.fetchall()]
 
@@ -70,7 +70,9 @@ class TradeRepository:
                     ('margin', 'REAL DEFAULT 0'),
                     ('position_value', 'REAL DEFAULT 0'),
                     ('order_type', 'TEXT DEFAULT "MARKET"'),
-                    ('fill_price', 'REAL')
+                    ('fill_price', 'REAL'),
+                    ('commission_open', 'REAL DEFAULT 0'),
+                    ('commission_close', 'REAL DEFAULT 0')
                 ]
 
                 for field, field_type in fields_to_add:
@@ -78,7 +80,6 @@ class TradeRepository:
                         await conn.execute(f"ALTER TABLE trades ADD COLUMN {field} {field_type}")
                         logger.info(f"✅ Добавлена колонка {field} в таблицу trades")
 
-                # Создаём индексы
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_signal_id ON trades(signal_id)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
@@ -94,32 +95,15 @@ class TradeRepository:
             return False
 
     async def save_trade(self, trade: Dict[str, Any]) -> Optional[int]:
-        """
-        Сохранить сделку в историю
-        trade dict должен содержать:
-            - signal_id
-            - symbol
-            - direction
-            - entry_price
-            - quantity
-            - leverage (опционально)
-            - margin (опционально)
-            - position_value (опционально)
-            - stop_loss (опционально)
-            - take_profit (опционально)
-            - opened_at
-            - status (опционально)
-            - order_type (опционально)
-            - fill_price (опционально)
-        """
         try:
             async with aiosqlite.connect(self.db_path) as conn:
                 cursor = await conn.execute("""
                     INSERT INTO trades (
                         signal_id, symbol, direction, entry_price, quantity,
                         leverage, margin, position_value, stop_loss, take_profit,
-                        opened_at, status, order_type, fill_price
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        opened_at, status, order_type, fill_price,
+                        commission_open, commission_close
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     trade.get('signal_id'),
                     trade.get('symbol'),
@@ -134,18 +118,16 @@ class TradeRepository:
                     trade.get('opened_at'),
                     trade.get('status', 'OPEN'),
                     trade.get('order_type', 'MARKET'),
-                    trade.get('fill_price')
+                    trade.get('fill_price'),
+                    trade.get('commission_open', 0),
+                    trade.get('commission_close', 0)
                 ))
-
                 await conn.commit()
                 trade_id = cursor.lastrowid
                 logger.info(f"💾 Сделка сохранена: ID={trade_id}, Signal={trade.get('signal_id')}")
                 return trade_id
-
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения сделки: {e}")
-            import traceback
-            traceback.print_exc()
             return None
 
     async def update_trade(
@@ -155,22 +137,21 @@ class TradeRepository:
             pnl: float,
             pnl_percent: float,
             close_reason: str,
-            closed_at: datetime
+            closed_at: datetime,
+            commission_close: float = 0
     ) -> bool:
-        """Обновить закрытую сделку"""
         try:
             async with aiosqlite.connect(self.db_path) as conn:
                 await conn.execute("""
                     UPDATE trades
                     SET close_price = ?, pnl = ?, pnl_percent = ?,
-                        close_reason = ?, closed_at = ?, status = 'CLOSED'
+                        close_reason = ?, closed_at = ?, status = 'CLOSED',
+                        commission_close = ?
                     WHERE id = ?
-                """, (close_price, pnl, pnl_percent, close_reason, closed_at, trade_id))
-
+                """, (close_price, pnl, pnl_percent, close_reason, closed_at, commission_close, trade_id))
                 await conn.commit()
                 logger.info(f"✅ Сделка #{trade_id} обновлена (закрыта)")
                 return True
-
         except Exception as e:
             logger.error(f"❌ Ошибка обновления сделки: {e}")
             return False

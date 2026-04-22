@@ -152,10 +152,10 @@ analysis:
       enabled: true
       conditions_required: 4
       total_conditions: 5
-      expiration_hours: 3
+      expiration_hours: 8
     m15:
       min_rr_ratio: 3.0
-      expiration_hours: 3
+      expiration_hours: 8
       order_type: MARKET
       max_slippage_pct: 1.0
   structure:
@@ -453,7 +453,7 @@ light_trader:
   - ENGULFING
   - PIN_BAR
   - MORNING_STAR
-  expiration_hours: 3
+  expiration_hours: 8
 # ========== ФАЗА 1.5.1: БЭКТЕСТИНГ ==========
 backtest:
   enabled: true

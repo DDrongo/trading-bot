@@ -1,21 +1,4 @@
-# analyzer/core/signal_repository.py (ПОЛНОСТЬЮ - ФАЗА 1.5.2)
-"""
-📊 SIGNAL REPOSITORY - Репозиторий для работы с сигналами
-ФАЗА 1.3.9.2:
-- Добавлен метод save_signal() для M15 сигналов
-- Добавлены поля current_price_at_signal и position_vs_zone
-
-ФАЗА 1.3.10:
-- Добавлена таблица trend_analysis
-
-ФАЗА 1.4.0:
-- Добавлено поле learning_comment для обучающих комментариев
-
-ФАЗА 1.5.2:
-- 🆕 Добавлен параметр learning_comment в save_watch_signal()
-- 🆕 WATCH-сигналы теперь сохраняются с обучающим комментарием
-- 🔧 ИСПРАВЛЕНО: save_trend_analysis теперь проверяет, изменился ли тренд
-"""
+# analyzer/core/signal_repository.py (ПОЛНОСТЬЮ - ИСПРАВЛЕННЫЙ)
 
 import aiosqlite
 import logging
@@ -48,135 +31,109 @@ class SignalRepository:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
             async with aiosqlite.connect(self.db_path) as conn:
-                cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signals'")
-                table_exists = await cursor.fetchone()
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS signals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        strategy TEXT DEFAULT "three_screen",
+                        direction TEXT NOT NULL,
+                        signal_subtype TEXT DEFAULT "M15",
+                        status TEXT DEFAULT "WATCH",
+                        confidence REAL DEFAULT 0.0,
+                        entry_price REAL DEFAULT 0.0,
+                        stop_loss REAL DEFAULT 0.0,
+                        take_profit REAL DEFAULT 0.0,
+                        trend_direction TEXT,
+                        trend_strength TEXT,
+                        signal_strength TEXT,
+                        trigger_pattern TEXT,
+                        risk_reward_ratio REAL,
+                        risk_pct REAL,
+                        expiration_time TIMESTAMP,
+                        created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        screen TEXT DEFAULT "M15",
+                        order_type TEXT DEFAULT "MARKET",
+                        fill_price REAL,
+                        position_size REAL,
+                        rejection_reason TEXT,
+                        zone_low REAL,
+                        zone_high REAL,
+                        expected_pattern TEXT,
+                        screen2_score INTEGER,
+                        leverage REAL DEFAULT 10,
+                        margin REAL,
+                        position_value REAL,
+                        reserved_margin REAL,
+                        current_price_at_signal REAL,
+                        position_vs_zone TEXT,
+                        learning_comment TEXT,
+                        entry_type TEXT DEFAULT "LEGACY",
+                        fvg_present INTEGER DEFAULT 0,
+                        liquidity_grabbed INTEGER DEFAULT 0,
+                        grab_price REAL,
+                        fvg_type TEXT,
+                        fvg_formed_at TIMESTAMP,
+                        fvg_age INTEGER,
+                        fvg_strength TEXT,
+                        liquidity_pools TEXT,
+                        selected_pool_price REAL,
+                        selected_pool_touches INTEGER,
+                        grab_time TIMESTAMP,
+                        grab_timeframe TEXT
+                    )
+                """)
+                logger.info("✅ Таблица signals создана (с SMC полями)")
 
-                if not table_exists:
-                    await conn.execute("""
-                        CREATE TABLE IF NOT EXISTS signals (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            symbol TEXT NOT NULL,
-                            strategy TEXT DEFAULT "three_screen",
-                            direction TEXT NOT NULL,
-                            signal_subtype TEXT DEFAULT "M15",
-                            status TEXT DEFAULT "WATCH",
-                            confidence REAL DEFAULT 0.0,
-                            entry_price REAL DEFAULT 0.0,
-                            stop_loss REAL DEFAULT 0.0,
-                            take_profit REAL DEFAULT 0.0,
-                            trend_direction TEXT,
-                            trend_strength TEXT,
-                            signal_strength TEXT,
-                            trigger_pattern TEXT,
-                            risk_reward_ratio REAL,
-                            risk_pct REAL,
-                            expiration_time TIMESTAMP,
-                            created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            screen TEXT DEFAULT "M15",
-                            order_type TEXT DEFAULT "MARKET",
-                            fill_price REAL,
-                            position_size REAL,
-                            rejection_reason TEXT,
-                            zone_low REAL,
-                            zone_high REAL,
-                            expected_pattern TEXT,
-                            screen2_score INTEGER,
-                            leverage REAL DEFAULT 10,
-                            margin REAL,
-                            position_value REAL,
-                            reserved_margin REAL,
-                            current_price_at_signal REAL,
-                            position_vs_zone TEXT,
-                            learning_comment TEXT
-                        )
-                    """)
-                    logger.info("✅ Таблица signals создана")
-                else:
-                    cursor = await conn.execute("PRAGMA table_info(signals)")
-                    columns = await cursor.fetchall()
-                    column_names = [col[1] for col in columns]
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        signal_id INTEGER,
+                        symbol TEXT,
+                        direction TEXT,
+                        entry_price REAL,
+                        close_price REAL,
+                        quantity REAL,
+                        leverage REAL DEFAULT 10,
+                        margin REAL,
+                        position_value REAL,
+                        pnl REAL,
+                        pnl_percent REAL,
+                        commission REAL,
+                        close_reason TEXT,
+                        opened_at TIMESTAMP,
+                        closed_at TIMESTAMP,
+                        status TEXT,
+                        order_type TEXT DEFAULT 'LIMIT',
+                        fill_price REAL,
+                        FOREIGN KEY (signal_id) REFERENCES signals(id)
+                    )
+                """)
+                logger.info("✅ Таблица trades создана")
 
-                    fields_to_add = [
-                        'signal_subtype', 'expiration_time', 'screen',
-                        'order_type', 'fill_price', 'position_size', 'rejection_reason',
-                        'zone_low', 'zone_high', 'expected_pattern', 'screen2_score',
-                        'updated_time', 'leverage', 'margin', 'position_value', 'reserved_margin',
-                        'current_price_at_signal', 'position_vs_zone', 'learning_comment'
-                    ]
-
-                    for field in fields_to_add:
-                        if field not in column_names:
-                            await conn.execute(f"ALTER TABLE signals ADD COLUMN {field} TEXT")
-                            logger.info(f"✅ Добавлено поле {field}")
-
-                cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
-                trades_exists = await cursor.fetchone()
-
-                if not trades_exists:
-                    await conn.execute("""
-                        CREATE TABLE IF NOT EXISTS trades (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            signal_id INTEGER,
-                            symbol TEXT,
-                            direction TEXT,
-                            entry_price REAL,
-                            close_price REAL,
-                            quantity REAL,
-                            leverage REAL DEFAULT 10,
-                            margin REAL,
-                            position_value REAL,
-                            pnl REAL,
-                            pnl_percent REAL,
-                            commission REAL,
-                            close_reason TEXT,
-                            opened_at TIMESTAMP,
-                            closed_at TIMESTAMP,
-                            status TEXT,
-                            order_type TEXT DEFAULT 'LIMIT',
-                            fill_price REAL,
-                            FOREIGN KEY (signal_id) REFERENCES signals(id)
-                        )
-                    """)
-                    logger.info("✅ Таблица trades создана")
-                else:
-                    cursor = await conn.execute("PRAGMA table_info(trades)")
-                    columns = await cursor.fetchall()
-                    column_names = [col[1] for col in columns]
-
-                    trade_fields = ['leverage', 'margin', 'position_value']
-                    for field in trade_fields:
-                        if field not in column_names:
-                            await conn.execute(f"ALTER TABLE trades ADD COLUMN {field} REAL")
-                            logger.info(f"✅ Добавлено поле {field}")
-
-                cursor = await conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='trend_analysis'")
-                trend_table_exists = await cursor.fetchone()
-
-                if not trend_table_exists:
-                    await conn.execute("""
-                        CREATE TABLE IF NOT EXISTS trend_analysis (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            symbol TEXT NOT NULL,
-                            trend_direction TEXT NOT NULL,
-                            adx REAL,
-                            ema20 REAL,
-                            ema50 REAL,
-                            macd_line REAL,
-                            macd_signal REAL,
-                            structure TEXT,
-                            confidence REAL,
-                            created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            UNIQUE(symbol, created_time)
-                        )
-                    """)
-                    logger.info("✅ Таблица trend_analysis создана (Фаза 1.3.10)")
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS trend_analysis (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        trend_direction TEXT NOT NULL,
+                        adx REAL,
+                        ema20 REAL,
+                        ema50 REAL,
+                        macd_line REAL,
+                        macd_signal REAL,
+                        structure TEXT,
+                        confidence REAL,
+                        created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(symbol, created_time)
+                    )
+                """)
+                logger.info("✅ Таблица trend_analysis создана")
 
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_time)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_subtype ON signals(signal_subtype)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_entry_type ON signals(entry_type)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_signal_id ON trades(signal_id)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_opened ON trades(opened_at)")
@@ -188,7 +145,7 @@ class SignalRepository:
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_trend_created ON trend_analysis(created_time)")
 
                 await conn.commit()
-                logger.info("✅ База данных инициализирована")
+                logger.info("✅ База данных инициализирована (Фаза 2.0 SMC)")
                 return True
 
         except Exception as e:
@@ -283,15 +240,24 @@ class SignalRepository:
             zone_high: float,
             screen2_score: int,
             expected_pattern: str = None,
-            expiration_hours: int = 3,
+            expiration_hours: int = 8,
             position_size: float = None,
             entry_price: float = None,
             leverage: float = 10,
             current_price: float = None,
-            learning_comment: str = None
+            learning_comment: str = None,
+            entry_type: str = "LEGACY",
+            fvg_type: str = None,
+            fvg_formed_at: str = None,
+            fvg_age: int = 0,
+            fvg_strength: str = None,
+            liquidity_pools: str = None,
+            selected_pool_price: float = 0,
+            selected_pool_touches: int = 0
     ) -> Optional[int]:
         try:
-            expiration_time = utc_now() + timedelta(hours=expiration_hours)
+            from analyzer.core.time_utils import utc_now
+            expiration_time = (utc_now() + timedelta(hours=expiration_hours)).strftime('%Y-%m-%d %H:%M:%S')
 
             position_vs_zone = ""
             if current_price is not None and zone_low > 0 and zone_high > 0:
@@ -317,14 +283,21 @@ class SignalRepository:
                             expected_pattern = ?, expiration_time = ?,
                             direction = ?, position_size = ?, entry_price = ?,
                             leverage = ?, current_price_at_signal = ?,
-                            position_vs_zone = ?, learning_comment = ?, updated_time = CURRENT_TIMESTAMP
+                            position_vs_zone = ?, learning_comment = ?,
+                            entry_type = ?, fvg_type = ?, fvg_formed_at = ?,
+                            fvg_age = ?, fvg_strength = ?, liquidity_pools = ?,
+                            selected_pool_price = ?, selected_pool_touches = ?,
+                            updated_time = CURRENT_TIMESTAMP
                         WHERE id = ?
                     """, (zone_low, zone_high, screen2_score, expected_pattern,
-                          expiration_time.isoformat(), direction, position_size,
+                          expiration_time, direction, position_size,
                           entry_price, leverage, current_price or 0,
-                          position_vs_zone, learning_comment, existing[0]))
+                          position_vs_zone, learning_comment, entry_type,
+                          fvg_type, fvg_formed_at, fvg_age, fvg_strength,
+                          liquidity_pools, selected_pool_price, selected_pool_touches,
+                          existing[0]))
                     await conn.commit()
-                    logger.info(f"🔄 Обновлён WATCH сигнал для {symbol}")
+                    logger.info(f"🔄 Обновлён WATCH сигнал для {symbol} (тип: {entry_type})")
                     return existing[0]
                 else:
                     cursor = await conn.execute("""
@@ -333,17 +306,19 @@ class SignalRepository:
                             zone_low, zone_high, screen2_score, expected_pattern,
                             expiration_time, position_size, entry_price, leverage,
                             current_price_at_signal, position_vs_zone, learning_comment,
+                            entry_type, fvg_type, fvg_formed_at, fvg_age, fvg_strength,
+                            liquidity_pools, selected_pool_price, selected_pool_touches,
                             created_time, updated_time
-                        ) VALUES (?, ?, 'WATCH', 'WATCH', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ) VALUES (?, ?, 'WATCH', 'WATCH', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     """, (symbol, direction, zone_low, zone_high, screen2_score,
-                          expected_pattern, expiration_time.isoformat(),
+                          expected_pattern, expiration_time,
                           position_size, entry_price, leverage,
-                          current_price or 0, position_vs_zone, learning_comment))
+                          current_price or 0, position_vs_zone, learning_comment,
+                          entry_type, fvg_type, fvg_formed_at, fvg_age, fvg_strength,
+                          liquidity_pools, selected_pool_price, selected_pool_touches))
                     await conn.commit()
                     signal_id = cursor.lastrowid
-                    logger.info(f"✅ Создан WATCH сигнал для {symbol} (ID={signal_id})")
-                    if learning_comment:
-                        logger.info(f"📚 WATCH комментарий сохранён ({len(learning_comment)} символов)")
+                    logger.info(f"✅ Создан WATCH сигнал для {symbol} (ID={signal_id}, тип={entry_type})")
 
                     await self.event_bus.publish(
                         EventType.WATCH_CREATED,
@@ -354,9 +329,10 @@ class SignalRepository:
                             'position_size': position_size,
                             'entry_price': entry_price,
                             'leverage': leverage,
-                            'expiration_time': expiration_time.isoformat(),
+                            'expiration_time': expiration_time,
                             'current_price_at_signal': current_price,
-                            'position_vs_zone': position_vs_zone
+                            'position_vs_zone': position_vs_zone,
+                            'entry_type': entry_type
                         },
                         'signal_repository'
                     )
@@ -387,7 +363,17 @@ class SignalRepository:
                 else:
                     position_vs_zone = "INSIDE"
 
-            expiration_time = utc_now() + timedelta(hours=3)
+            from analyzer.core.time_utils import utc_now
+            expiration_time = (utc_now() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+
+            entry_type = getattr(screen3, 'entry_type', 'LEGACY')
+            fvg_present = 1 if getattr(screen3, 'fvg_present', False) else 0
+            liquidity_grabbed = 1 if getattr(screen3, 'liquidity_grabbed', False) else 0
+            grab_price = getattr(screen3, 'grab_price', None)
+            grab_time = getattr(screen3, 'grab_time', None)
+            if grab_time and hasattr(grab_time, 'isoformat'):
+                grab_time = grab_time.isoformat()
+            grab_timeframe = getattr(screen3, 'grab_timeframe', None)
 
             async with aiosqlite.connect(self.db_path) as conn:
                 cursor = await conn.execute("""
@@ -398,8 +384,9 @@ class SignalRepository:
                         current_price_at_signal, position_vs_zone,
                         zone_low, zone_high, screen2_score, expected_pattern,
                         expiration_time, order_type, learning_comment,
-                        created_time, updated_time
-                    ) VALUES (?, ?, 'M15', 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MARKET', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        entry_type, fvg_present, liquidity_grabbed, grab_price,
+                        grab_time, grab_timeframe, created_time, updated_time
+                    ) VALUES (?, ?, 'M15', 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MARKET', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """, (
                     analysis.symbol,
                     "BUY" if screen3.signal_type == "BUY" else "SELL",
@@ -415,22 +402,101 @@ class SignalRepository:
                     analysis.zone_high,
                     analysis.screen2_score,
                     analysis.expected_pattern,
-                    expiration_time.isoformat(),
-                    learning_comment
+                    expiration_time,
+                    learning_comment,
+                    entry_type,
+                    fvg_present,
+                    liquidity_grabbed,
+                    grab_price,
+                    grab_time,
+                    grab_timeframe
                 ))
                 await conn.commit()
                 signal_id = cursor.lastrowid
-                logger.info(f"✅ M15 сигнал {analysis.symbol} сохранён (ID={signal_id})")
-                if learning_comment:
-                    logger.info(f"📚 {learning_comment[:100]}...")
+                logger.info(f"✅ M15 сигнал {analysis.symbol} сохранён (ID={signal_id}, тип={entry_type})")
 
                 return signal_id
 
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения M15 сигнала {analysis.symbol}: {e}")
-            import traceback
-            traceback.print_exc()
             return None
+
+    async def update_entry_type(self, signal_id: int, entry_type: str) -> bool:
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                await conn.execute("""
+                    UPDATE signals 
+                    SET entry_type = ?, updated_time = CURRENT_TIMESTAMP 
+                    WHERE id = ?
+                """, (entry_type, signal_id))
+                await conn.commit()
+                logger.info(f"✅ Сигнал #{signal_id}: entry_type = {entry_type}")
+                return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления entry_type: {e}")
+            return False
+
+    async def get_signals_by_entry_type(self, entry_type: str, limit: int = 100) -> List[Dict[str, Any]]:
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                cursor = await conn.execute("""
+                    SELECT * FROM signals 
+                    WHERE entry_type = ? 
+                    ORDER BY created_time DESC 
+                    LIMIT ?
+                """, (entry_type, limit))
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения сигналов по entry_type: {e}")
+            return []
+
+    async def get_smc_statistics(self) -> Dict[str, Any]:
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+
+                cursor = await conn.execute("""
+                    SELECT 
+                        entry_type,
+                        COUNT(*) as total,
+                        SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) as active,
+                        SUM(CASE WHEN status = 'CLOSED' THEN 1 ELSE 0 END) as closed,
+                        SUM(CASE WHEN status = 'REJECTED' THEN 1 ELSE 0 END) as rejected
+                    FROM signals 
+                    WHERE signal_subtype = 'M15'
+                    GROUP BY entry_type
+                """)
+                by_entry_type = [dict(row) for row in await cursor.fetchall()]
+
+                cursor = await conn.execute("""
+                    SELECT 
+                        SUM(CASE WHEN fvg_present = 1 THEN 1 ELSE 0 END) as with_fvg,
+                        SUM(CASE WHEN fvg_present = 0 THEN 1 ELSE 0 END) as without_fvg
+                    FROM signals 
+                    WHERE signal_subtype = 'M15'
+                """)
+                fvg_stats = dict(await cursor.fetchone())
+
+                cursor = await conn.execute("""
+                    SELECT 
+                        SUM(CASE WHEN liquidity_grabbed = 1 THEN 1 ELSE 0 END) as with_grab,
+                        SUM(CASE WHEN liquidity_grabbed = 0 THEN 1 ELSE 0 END) as without_grab
+                    FROM signals 
+                    WHERE signal_subtype = 'M15'
+                """)
+                grab_stats = dict(await cursor.fetchone())
+
+                return {
+                    'by_entry_type': by_entry_type,
+                    'fvg_stats': fvg_stats,
+                    'liquidity_grab_stats': grab_stats
+                }
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения SMC статистики: {e}")
+            return {}
 
     async def save_trend_analysis(
             self,
@@ -444,15 +510,10 @@ class SignalRepository:
             structure: str,
             confidence: float
     ) -> Optional[int]:
-        """
-        Сохраняет тренд ТОЛЬКО если он изменился или прошло более 4 часов
-        (чтобы не забивать БД мусором каждую минуту)
-        """
         try:
             async with aiosqlite.connect(self.db_path) as conn:
                 conn.row_factory = aiosqlite.Row
 
-                # 🔧 Проверяем последний сохранённый тренд для этого символа
                 cursor = await conn.execute("""
                     SELECT trend_direction, adx, created_time 
                     FROM trend_analysis 
@@ -470,7 +531,6 @@ class SignalRepository:
                     last_adx = last_trend['adx']
                     last_time_str = last_trend['created_time']
 
-                    # Парсим время последней записи
                     if last_time_str:
                         try:
                             last_time = datetime.fromisoformat(last_time_str.replace('Z', '+00:00'))
@@ -480,10 +540,6 @@ class SignalRepository:
                     else:
                         hours_passed = 999
 
-                    # Сохраняем только если:
-                    # 1. Изменилось направление тренда
-                    # 2. ADX изменился значительно (более чем на 5 пунктов)
-                    # 3. Прошло более 4 часов
                     direction_changed = last_direction != trend_direction
                     adx_changed = abs(last_adx - adx) > 5
                     time_passed = hours_passed >= 4
@@ -503,7 +559,6 @@ class SignalRepository:
                             reason.append(f"прошло {hours_passed:.1f} ч")
                         logger.info(f"💾 {symbol}: сохраняем тренд ({', '.join(reason)})")
 
-                # Сохраняем тренд
                 cursor = await conn.execute("""
                     INSERT INTO trend_analysis (
                         symbol, trend_direction, adx, ema20, ema50,
@@ -578,10 +633,14 @@ class SignalRepository:
             stop_loss: float,
             take_profit: float,
             trigger_pattern: str,
-            expiration_hours: int = 3
+            expiration_hours: int = 8,
+            grab_price: float = None,
+            grab_time: str = None,
+            grab_timeframe: str = None
     ) -> Optional[int]:
         try:
-            expiration_time = utc_now() + timedelta(hours=expiration_hours)
+            from analyzer.core.time_utils import utc_now
+            new_expiration = (utc_now() + timedelta(hours=expiration_hours)).strftime('%Y-%m-%d %H:%M:%S')
 
             async with aiosqlite.connect(self.db_path) as conn:
                 cursor = await conn.execute("""
@@ -608,13 +667,16 @@ class SignalRepository:
                         trigger_pattern = ?,
                         order_type = 'MARKET',
                         expiration_time = ?,
+                        grab_price = COALESCE(?, grab_price),
+                        grab_time = COALESCE(?, grab_time),
+                        grab_timeframe = COALESCE(?, grab_timeframe),
                         updated_time = CURRENT_TIMESTAMP
                     WHERE id = ?
                 """, (entry_price, stop_loss, take_profit, trigger_pattern,
-                      expiration_time.isoformat(), signal_id))
+                      new_expiration, grab_price, grab_time, grab_timeframe, signal_id))
                 await conn.commit()
 
-                logger.info(f"✅ WATCH → ACTIVE для {symbol} (ID={signal_id})")
+                logger.info(f"✅ WATCH → ACTIVE для {symbol} (ID={signal_id}), истекает {new_expiration}")
                 return signal_id
 
         except Exception as e:
@@ -645,7 +707,8 @@ class SignalRepository:
                     SELECT id, symbol, signal_subtype, status, 
                            position_size, entry_price, leverage, 
                            reserved_margin, expiration_time,
-                           current_price_at_signal, position_vs_zone
+                           current_price_at_signal, position_vs_zone,
+                           entry_type
                     FROM signals 
                     WHERE id = ? AND signal_subtype = 'WATCH'
                 """, (signal_id,))
@@ -664,7 +727,8 @@ class SignalRepository:
                            position_size, entry_price, leverage, 
                            reserved_margin, expiration_time,
                            created_time, updated_time,
-                           zone_low, zone_high, current_price_at_signal, position_vs_zone
+                           zone_low, zone_high, current_price_at_signal, position_vs_zone,
+                           entry_type
                     FROM signals 
                     WHERE signal_subtype = 'WATCH' 
                     AND status = 'WATCH'
@@ -883,6 +947,15 @@ class SignalRepository:
                 status_stats = {row['status']: row['count'] for row in rows}
 
                 cursor = await conn.execute("""
+                    SELECT entry_type, COUNT(*) as count 
+                    FROM signals 
+                    WHERE signal_subtype = 'M15'
+                    GROUP BY entry_type
+                """)
+                rows = await cursor.fetchall()
+                entry_type_stats = {row['entry_type']: row['count'] for row in rows}
+
+                cursor = await conn.execute("""
                     SELECT 
                         COUNT(*) as total_trades,
                         COALESCE(SUM(pnl), 0) as total_pnl,
@@ -912,6 +985,7 @@ class SignalRepository:
                     'sell_signals': sell_signals,
                     'subtypes_stats': subtypes_stats,
                     'status_stats': status_stats,
+                    'entry_type_stats': entry_type_stats,
                     'closed_trades': total_trades,
                     'winning_trades': winning_trades,
                     'losing_trades': losing_trades,
@@ -952,6 +1026,20 @@ class SignalRepository:
     async def close(self) -> None:
         logger.info("📊 SignalRepository закрыт")
         pass
+
+    async def get_watch_count(self) -> int:
+        try:
+            async with aiosqlite.connect(self.db_path) as conn:
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) FROM signals 
+                    WHERE status = 'WATCH' 
+                    AND expiration_time > datetime('now')
+                """)
+                row = await cursor.fetchone()
+                return row[0] if row else 0
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения количества WATCH: {e}")
+            return 0
 
 
 signal_repository = SignalRepository()

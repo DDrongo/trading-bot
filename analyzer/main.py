@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# analyzer/main.py (ИСПРАВЛЕННЫЙ - ЛОГИ РАБОТАЮТ)
-"""
-🚀 ГЛАВНЫЙ ЗАПУСКАЕМЫЙ ФАЙЛ ДЛЯ АНАЛИЗАТОРА СИГНАЛОВ
-"""
+# analyzer/main.py
 
 import asyncio
 import logging
 import yaml
 import sys
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
 
@@ -23,82 +20,61 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def setup_logging():
-    """
-    Простая и надёжная настройка логирования
-    """
+    """Настройка логирования"""
     log_file = LOG_DIR / 'signal_generator.log'
 
-    # Очищаем существующие handlers
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
 
-    # Настраиваем корневой логгер
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file, encoding='utf-8')
-        ]
-    )
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter('%(message)s'))
 
-    # Устанавливаем уровень для консоли (только INFO и выше)
-    logging.root.handlers[0].setLevel(logging.INFO)
+    from analyzer.utils.logging_filters import ConsoleFilter
+    console.addFilter(ConsoleFilter())
 
-    # Уменьшаем спам от некоторых модулей
-    logging.getLogger('api_client_bybit').setLevel(logging.WARNING)
-    logging.getLogger('liquidity_prefilter').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('aiohttp').setLevel(logging.WARNING)
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s'
+    ))
 
-    print(f"✅ Логирование: консоль (INFO+) + файл {log_file} (DEBUG)")
+    logging.root.setLevel(logging.DEBUG)
+    logging.root.addHandler(console)
+    logging.root.addHandler(file_handler)
 
 
-# Настраиваем логирование
 setup_logging()
 logger = logging.getLogger('signal_generator')
 
 
 class SignalGeneratorService:
-    """Главный сервис генерации сигналов"""
-
     def __init__(self, config_path: str = 'analyzer/config/config.yaml'):
         self.config_path = config_path
         self.config = self._load_config()
-        self.orchestrator: Optional[AnalysisOrchestrator] = None
-        self.position_manager: Optional[PositionManager] = None
-
+        self.orchestrator = None
+        self.position_manager = None
         data_provider.configure(self.config)
-        logger.info("✅ DataProvider сконфигурирован")
-
-        self.market_type = self.config.get('market_type', 'linear')
         self.trading_mode = self.config.get('trading_mode', 'pro')
-        logger.info(f"🎯 Рынок: {self.market_type.upper()}")
-        logger.info(f"🎯 Режим торговли: {self.trading_mode.upper()}")
 
     def _load_config(self) -> Dict[str, Any]:
         try:
-            config_full_path = PROJECT_ROOT / self.config_path
-            with open(config_full_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-            logger.info(f"✅ Конфигурация загружена")
-            return config
+            path = PROJECT_ROOT / self.config_path
+            with open(path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
         except Exception as e:
-            logger.error(f"❌ Ошибка загрузки конфига: {e}")
+            logger.error(f"Ошибка загрузки конфига: {e}")
             return {}
 
     async def _on_signal_generated(self, event: Event):
-        try:
-            data = event.data
-            logger.info(
-                f"🔔 СИГНАЛ #{data.get('signal_id')}: {data.get('symbol')} {data.get('signal_type')} @ {data.get('entry_price'):.4f}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка в обработчике событий: {e}")
+        data = event.data
+        entry_type = data.get('entry_type', 'UNKNOWN')
+        icon = "🎯" if entry_type == "SNIPER" else "📈" if entry_type == "TREND" else "📊"
+        print(f"\n{icon} СИГНАЛ #{data.get('signal_id')}: {data.get('symbol')} {data.get('signal_type')} [{entry_type}] @ {data.get('entry_price'):.4f}\n")
 
     async def initialize(self) -> bool:
+        print("🚀 Инициализация...")
         try:
-            logger.info("🚀 Инициализация...")
             await event_bus.start()
             event_bus.subscribe(EventType.TRADING_SIGNAL_GENERATED, self._on_signal_generated)
 
@@ -107,62 +83,86 @@ class SignalGeneratorService:
 
             self.orchestrator = AnalysisOrchestrator(self.config)
             if not await self.orchestrator.initialize():
-                logger.error("❌ Не удалось инициализировать оркестратор")
+                print("❌ Ошибка: оркестратор")
                 return False
 
             self.position_manager = PositionManager(self.config)
             await self.position_manager.initialize()
 
-            logger.info("✅ Готов к работе")
+            print("✅ Готов к работе")
             return True
         except Exception as e:
-            logger.error(f"❌ Ошибка инициализации: {e}")
+            print(f"❌ Ошибка: {e}")
             return False
 
-    async def continuous_monitoring(self, interval_seconds: int = 60):
-        logger.info(f"🔄 Запуск мониторинга (интервал {interval_seconds} сек, режим {self.trading_mode.upper()})")
-        iteration = 0
+    async def continuous_monitoring(self, interval: int = 60):
+        last_watch = -1
+        last_signals = -1
+        last_pnl = None
 
         while True:
-            iteration += 1
-            iteration_start = datetime.now()
-
             try:
-                logger.info(f"🔄 ИТЕРАЦИЯ #{iteration} - {datetime.now().strftime('%H:%M:%S')}")
+                from analyzer.core.signal_repository import signal_repository
 
-                all_symbols = await data_provider.get_all_symbols()
-                if not all_symbols:
-                    await asyncio.sleep(interval_seconds)
+                # Проверяем, есть ли активные WATCH сигналы
+                watch_count = await signal_repository.get_watch_count()
+
+                if watch_count > 0:
+                    # РЕЖИМ МОНИТОРИНГА: не фильтруем, только ждём цену
+                    print(f"👀 Мониторим {watch_count} WATCH сигналов...")
+
+                    # Получаем активные позиции
+                    if self.position_manager:
+                        stats = await self.position_manager.paper_account.get_statistics()
+                        if stats['total_pnl'] != last_pnl:
+                            print(f"💰 PnL: {stats['total_pnl']:+.0f} USDT")
+                            last_pnl = stats['total_pnl']
+
+                    await asyncio.sleep(interval)
                     continue
 
-                symbols_to_analyze = await self.orchestrator._get_liquid_symbols(all_symbols)
-                logger.info(f"🔍 Анализ {len(symbols_to_analyze)} монет...")
+                # ПОЛНЫЙ ЦИКЛ (нет WATCH сигналов)
+                print("📡 Загружаем список монет...")
+                all_symbols = await data_provider.get_all_symbols()
+                if not all_symbols:
+                    await asyncio.sleep(interval)
+                    continue
+                print(f"   ✅ Получено {len(all_symbols)} монет")
 
-                result = await self.orchestrator.analyze_symbols_batch(symbols_to_analyze)
+                print("🔍 Фильтруем монеты по ликвидности...")
+                symbols = await self.orchestrator._get_liquid_symbols(all_symbols)
+                print(f"   ✅ Осталось {len(symbols)} монет")
 
-                signals_found = sum(1 for a in result.values() if a and a.should_trade)
-                if signals_found > 0:
-                    logger.info(f"🎯 НАЙДЕНО {signals_found} СИГНАЛОВ!")
-                else:
-                    logger.info(f"💤 Сигналы не найдены")
+                if symbols:
+                    print(f"🔬 Анализируем {len(symbols)} монет...")
+                    result = await self.orchestrator.analyze_symbols_batch(symbols)
 
-                if self.position_manager:
-                    stats = await self.position_manager.paper_account.get_statistics()
-                    logger.info(f"💰 PAPER: Баланс {stats['balance']:.2f} | Позиций {stats['open_positions']}")
+                    signals = sum(1 for a in result.values() if a and a.should_trade)
+                    watch = sum(
+                        1 for a in result.values() if a and a.screen2 and a.screen2.passed and not a.should_trade)
 
-                iteration_duration = (datetime.now() - iteration_start).total_seconds()
-                wait_time = max(1, interval_seconds - iteration_duration)
-                await asyncio.sleep(wait_time)
+                    if watch != last_watch or signals != last_signals:
+                        print(f"\n👀 WATCH: {watch} | ⚡ СИГНАЛОВ: {signals}")
+                        last_watch = watch
+                        last_signals = signals
+
+                    if self.position_manager:
+                        stats = await self.position_manager.paper_account.get_statistics()
+                        if stats['total_pnl'] != last_pnl:
+                            print(f"💰 PnL: {stats['total_pnl']:+.0f} USDT")
+                            last_pnl = stats['total_pnl']
+
+                print(f"⏳ Пауза {interval} сек...\n")
+                await asyncio.sleep(interval)
 
             except asyncio.CancelledError:
-                logger.info("🛑 Мониторинг остановлен")
+                print("\n🛑 Остановлено")
                 break
             except Exception as e:
-                logger.error(f"❌ Ошибка: {e}")
-                await asyncio.sleep(interval_seconds)
+                print(f"❌ Ошибка: {e}")
+                await asyncio.sleep(interval)
 
     async def cleanup(self):
-        logger.info("🧹 Очистка...")
         if self.position_manager:
             await self.position_manager.cleanup()
         if self.orchestrator:
@@ -173,27 +173,21 @@ class SignalGeneratorService:
 
 async def main():
     service = SignalGeneratorService()
-    try:
-        logger.info("=" * 60)
-        logger.info("🚀 ЗАПУСК БОТА")
-        logger.info("=" * 60)
-        logger.info(f"🎯 Режим: {service.trading_mode.upper()}")
-        logger.info(f"📁 Логи: {LOG_DIR / 'signal_generator.log'}")
-        logger.info("=" * 60)
+    print("=" * 50)
+    print("🚀 GANDALF 2.0 SMC")
+    print(f"🎯 Режим: {service.trading_mode.upper()}")
+    print("=" * 50)
 
-        if not await service.initialize():
-            return
+    if not await service.initialize():
+        print("❌ Ошибка инициализации")
+        return
 
-        interval_seconds = service.config.get('analysis', {}).get('monitoring_interval_seconds', 60)
-        await service.continuous_monitoring(interval_seconds)
-
-    except KeyboardInterrupt:
-        logger.info("🛑 Остановлено пользователем")
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}")
-    finally:
-        await service.cleanup()
+    interval = service.config.get('analysis', {}).get('monitoring_interval_seconds', 60)
+    await service.continuous_monitoring(interval)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Остановлено")

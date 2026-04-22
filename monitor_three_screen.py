@@ -1,28 +1,6 @@
 #!/usr/bin/env python3
-# monitor_three_screen.py (ПОЛНАЯ ВЕРСИЯ - ФАЗА 1.5.2)
 """
-🎯 МОНИТОР ДЛЯ THREE SCREEN ANALYZER - ВЕРСИЯ 1.5.2
-Особенности:
-- Отображение WATCH и M15 сигналов
-- Показ зон входа (zone_low/zone_high)
-- Показ score Screen2
-- ЭКСПОРТ ДАННЫХ в CSV/JSON/TXT/ZIP
-- Папка экспорта: logs/exports/YYYY-MM-DD/
-- DataProvider для получения текущей цены
-- РАЗДЕЛЕНИЕ планируемых и фактических данных
-- ВРЕМЕННАЯ ШКАЛА (создан, истекает, открыт, закрыт)
-- СОСТОЯНИЕ СЧЁТА (депозит, маржа, резерв, доступно, PnL)
-- ИСПРАВЛЕНО: единое время через time_utils
-- ИСПРАВЛЕНО: отображение состояния счёта с учётом позиций
-
-ФАЗА 1.4.0:
-- Добавлено отображение обучающих комментариев (learning_comment)
-
-ФАЗА 1.5.2:
-- 🔧 ИСПРАВЛЕНО: задержка при загрузке таблиц (цена из WebSocket)
-- 🔧 ИСПРАВЛЕНО: моргание в реалтайм-мониторе
-- 🆕 Entry пустое для WATCH, fill_price для ACTIVE/CLOSED
-- 🆕 Колонка «Тек. цена» обновляется мгновенно
+🎯 МОНИТОР ДЛЯ THREE SCREEN ANALYZER - ВЕРСИЯ 2.1 (FINAL)
 """
 
 import asyncio
@@ -112,11 +90,9 @@ class ThreeScreenMonitor:
         except Exception:
             pass
 
-        # 🔧 ФАЗА 1.5.2: Подключаемся к WebSocket для мгновенного получения цен
         self.websocket = None
         try:
             from analyzer.core.websocket_client import BybitWebSocketClient
-            # Создаём WebSocket клиент (он будет использовать те же символы что и бот)
             self.websocket = BybitWebSocketClient()
         except Exception:
             pass
@@ -152,13 +128,12 @@ class ThreeScreenMonitor:
             'show_rr_ratio': True
         }
 
-        # 🔧 ФАЗА 1.5.2: Кэш цен для мгновенного отображения
         self._price_cache: Dict[str, float] = {}
         self._price_cache_time: Optional[datetime] = None
-        self._price_cache_ttl = 5  # секунд
+        self._price_cache_ttl = 5
 
-        print(f"📊 Монитор использует БД: {self.db_path}")
-        print(f"🕐 Часовой пояс: UTC+{self.timezone_offset}")
+        print(f"Monitor using DB: {self.db_path}")
+        print(f"Timezone: UTC+{self.timezone_offset}")
 
     @staticmethod
     def strip_ansi(text: str) -> str:
@@ -174,9 +149,9 @@ class ThreeScreenMonitor:
 
     @staticmethod
     def print_header(title: str) -> None:
-        print(f"\n{Fore.CYAN}{Style.BRIGHT}{'=' * 80}{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}{Style.BRIGHT}{'=' * 90}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}{Style.BRIGHT}{title}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}{Style.BRIGHT}{'=' * 80}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{Style.BRIGHT}{'=' * 90}{Style.RESET_ALL}")
 
     def utc_to_local(self, utc_str: str) -> datetime:
         if not utc_str:
@@ -221,9 +196,9 @@ class ThreeScreenMonitor:
     def format_direction(direction: str) -> str:
         direction_lower = direction.lower() if direction else ''
         if direction_lower in ['buy', 'long']:
-            return f"{Fore.GREEN}▲ BUY{Style.RESET_ALL}"
+            return f"{Fore.GREEN}BUY{Style.RESET_ALL}"
         elif direction_lower in ['sell', 'short']:
-            return f"{Fore.RED}▼ SELL{Style.RESET_ALL}"
+            return f"{Fore.RED}SELL{Style.RESET_ALL}"
         return direction or 'N/A'
 
     @staticmethod
@@ -257,7 +232,6 @@ class ThreeScreenMonitor:
         return f"{color}{confidence * 100:.1f}%{Style.RESET_ALL}"
 
     def format_price(self, price: float) -> str:
-        """Унифицированное форматирование цены"""
         if price is None or price == 0:
             return "-"
         if price < 0.01:
@@ -298,16 +272,6 @@ class ThreeScreenMonitor:
             color = Fore.RED
         return f"{color}{rr:.2f}:1{Style.RESET_ALL}"
 
-    @staticmethod
-    def format_screen(screen: str) -> str:
-        if not screen:
-            return "-"
-        if screen.upper() == 'WATCH':
-            return f"{Fore.YELLOW}WATCH{Style.RESET_ALL}"
-        elif screen.upper() == 'M15':
-            return f"{Fore.GREEN}M15{Style.RESET_ALL}"
-        return screen
-
     def format_zone(self, zone_low: float, zone_high: float) -> str:
         if zone_low is None or zone_high is None or zone_low == 0 or zone_high == 0:
             return "-"
@@ -325,20 +289,22 @@ class ThreeScreenMonitor:
             return f"{Fore.RED}{score}/8{Style.RESET_ALL}"
 
     @staticmethod
-    def format_position_size(size: float) -> str:
-        if size is None or size == 0:
+    def format_entry_type(entry_type: str) -> str:
+        if not entry_type:
             return "-"
-        return f"{size:.4f}"
-
-    @staticmethod
-    def format_leverage(leverage: float) -> str:
-        if leverage is None or leverage == 0:
-            return "10x"
-        return f"{leverage:.1f}x"
+        entry_type_upper = entry_type.upper()
+        if entry_type_upper == 'SNIPER':
+            return f"{Fore.GREEN}SNIPER{Style.RESET_ALL}"
+        elif entry_type_upper == 'TREND':
+            return f"{Fore.CYAN}TREND{Style.RESET_ALL}"
+        elif entry_type_upper == 'LEGACY':
+            return f"{Fore.YELLOW}LEGACY{Style.RESET_ALL}"
+        else:
+            return entry_type
 
     def create_table(self, headers: List[str], data: List[List[str]]) -> str:
         if not data:
-            return "Нет данных"
+            return "No data"
 
         col_widths = []
         for i, header in enumerate(headers):
@@ -386,223 +352,7 @@ class ThreeScreenMonitor:
         export_dir.mkdir(parents=True, exist_ok=True)
         return export_dir
 
-    @staticmethod
-    def _get_file_size(file_path: str) -> str:
-        try:
-            size = os.path.getsize(file_path)
-            if size < 1024:
-                return f"{size} B"
-            elif size < 1024 * 1024:
-                return f"{size / 1024:.2f} KB"
-            else:
-                return f"{size / (1024 * 1024):.2f} MB"
-        except Exception:
-            return "?"
-
-    def _open_export_folder(self, file_path: str) -> None:
-        folder = os.path.dirname(file_path)
-        try:
-            if os.name == 'nt':
-                os.startfile(folder)
-            elif os.name == 'posix':
-                if os.system(f'open "{folder}"') != 0:
-                    os.system(f'xdg-open "{folder}"')
-            print(f"{Fore.GREEN}📂 Папка открыта: {folder}{Style.RESET_ALL}")
-        except Exception as e:
-            print(f"{Fore.YELLOW}⚠️ Не удалось открыть папку: {e}{Style.RESET_ALL}")
-
-    async def export_signals(self, fmt: str = 'csv') -> Optional[str]:
-        try:
-            if not self.signal_repo:
-                print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
-                return None
-
-            signals = await self.signal_repo.get_signals(limit=1000)
-            if not signals:
-                print(f"{Fore.YELLOW}⚠️ Нет данных для экспорта{Style.RESET_ALL}")
-                return None
-
-            export_dir = self._get_export_dir()
-            timestamp = now().strftime("%Y%m%d_%H%M%S")
-            fields = ['id', 'symbol', 'direction', 'signal_subtype', 'status', 'entry_price', 'stop_loss',
-                      'take_profit', 'risk_reward_ratio', 'zone_low', 'zone_high', 'screen2_score', 'expected_pattern',
-                      'trigger_pattern', 'confidence', 'created_time', 'expiration_time', 'updated_time', 'fill_price',
-                      'position_size', 'leverage', 'learning_comment']
-
-            if fmt == 'csv':
-                filename = export_dir / f"signals_{timestamp}.csv"
-                with open(filename, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=fields)
-                    writer.writeheader()
-                    for signal in signals:
-                        row = {field: signal.get(field, '') for field in fields}
-                        writer.writerow(row)
-                print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-                return str(filename)
-            elif fmt == 'json':
-                filename = export_dir / f"signals_{timestamp}.json"
-                with open(filename, 'w', encoding='utf-8') as f:
-                    json.dump(signals, f, ensure_ascii=False, indent=2, default=str)
-                print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-                return str(filename)
-            return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка экспорта: {e}")
-            print(f"{Fore.RED}❌ Ошибка экспорта: {e}{Style.RESET_ALL}")
-            return None
-
-    async def export_trades(self, fmt: str = 'csv') -> Optional[str]:
-        try:
-            if not self.trade_repo:
-                print(f"{Fore.RED}❌ TradeRepository не инициализирован{Style.RESET_ALL}")
-                return None
-
-            trades = await self.trade_repo.get_closed_trades(limit=1000)
-            if not trades:
-                print(f"{Fore.YELLOW}⚠️ Нет данных для экспорта{Style.RESET_ALL}")
-                return None
-
-            export_dir = self._get_export_dir()
-            timestamp = now().strftime("%Y%m%d_%H%M%S")
-            fields = ['id', 'signal_id', 'symbol', 'direction', 'entry_price', 'close_price', 'quantity', 'leverage',
-                      'margin', 'position_value', 'pnl', 'pnl_percent', 'commission', 'close_reason', 'opened_at',
-                      'closed_at', 'status']
-
-            if fmt == 'csv':
-                filename = export_dir / f"trades_{timestamp}.csv"
-                with open(filename, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=fields)
-                    writer.writeheader()
-                    for trade in trades:
-                        row = {field: trade.get(field, '') for field in fields}
-                        writer.writerow(row)
-                print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-                return str(filename)
-            elif fmt == 'json':
-                filename = export_dir / f"trades_{timestamp}.json"
-                with open(filename, 'w', encoding='utf-8') as f:
-                    json.dump(trades, f, ensure_ascii=False, indent=2, default=str)
-                print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-                return str(filename)
-            return None
-        except Exception as e:
-            logger.error(f"❌ Ошибка экспорта: {e}")
-            return None
-
-    async def export_stats(self) -> str:
-        try:
-            stats = await self.signal_repo.get_database_stats() if self.signal_repo else {}
-            export_dir = self._get_export_dir()
-            timestamp = now().strftime("%Y%m%d_%H%M%S")
-            filename = export_dir / f"stats_{timestamp}.txt"
-
-            content = f"""
-========================================
-СТАТИСТИКА ТОРГОВОГО БОТА
-Дата: {format_local(now())}
-========================================
-
-СИГНАЛЫ:
-  Всего сигналов:      {stats.get('total_signals', 0)}
-  WATCH:               {stats.get('subtypes_stats', {}).get('WATCH', 0)}
-  M15:                 {stats.get('subtypes_stats', {}).get('M15', 0)}
-  Активных:            {stats.get('active_signals', 0)}
-  Отклонённых:         {stats.get('rejected_signals', 0)}
-  BUY:                 {stats.get('buy_signals', 0)}
-  SELL:                {stats.get('sell_signals', 0)}
-
-СДЕЛКИ:
-  Закрытых сделок:     {stats.get('closed_trades', 0)}
-  Прибыльных:          {stats.get('winning_trades', 0)}
-  Убыточных:           {stats.get('losing_trades', 0)}
-  Общий PnL:           {stats.get('total_pnl', 0):.2f}
-  Win Rate:            {stats.get('win_rate', 0):.1f}%
-
-ТРЕНДЫ:
-  Всего анализов:      {stats.get('total_trends', 0)}
-"""
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(content)
-            print(f"{Fore.GREEN}✅ Файл сохранён: {filename}{Style.RESET_ALL}")
-            return str(filename)
-        except Exception as e:
-            logger.error(f"❌ Ошибка экспорта: {e}")
-            return ""
-
-    async def export_all(self) -> str:
-        try:
-            export_dir = self._get_export_dir()
-            timestamp = now().strftime("%Y%m%d_%H%M%S")
-            zip_path = export_dir / f"full_export_{timestamp}.zip"
-
-            temp_files = []
-            signals_file = await self.export_signals('csv')
-            if signals_file:
-                temp_files.append(signals_file)
-            trades_file = await self.export_trades('csv')
-            if trades_file:
-                temp_files.append(trades_file)
-            stats_file = await self.export_stats()
-            if stats_file:
-                temp_files.append(stats_file)
-
-            if not temp_files:
-                print(f"{Fore.YELLOW}⚠️ Нет данных для архивации{Style.RESET_ALL}")
-                return ""
-
-            with zipfile.ZipFile(zip_path, 'w') as zipf:
-                for file_path in temp_files:
-                    zipf.write(file_path, os.path.basename(file_path))
-
-            print(f"{Fore.GREEN}✅ ZIP архив создан: {zip_path}{Style.RESET_ALL}")
-            return str(zip_path)
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-            return ""
-
-    async def export_menu(self):
-        while True:
-            self.clear_screen()
-            self.print_header("📁 ЭКСПОРТ ДАННЫХ")
-            export_dir = self._get_export_dir()
-            print(f"{Fore.YELLOW}Выберите формат экспорта:{Style.RESET_ALL}")
-            print("1. 📊 Экспорт сигналов (CSV)")
-            print("2. 📊 Экспорт сигналов (JSON)")
-            print("3. 📈 Экспорт сделок (CSV)")
-            print("4. 📈 Экспорт сделок (JSON)")
-            print("5. 📋 Экспорт статистики (TXT)")
-            print("6. 📦 Экспорт всех данных (ZIP)")
-            print("0. 🔙 Назад")
-            print(f"{Fore.CYAN}📂 Папка экспорта: {export_dir}{Style.RESET_ALL}")
-
-            try:
-                choice = input(f"\n{Fore.CYAN}🎯 Выбор (0-6): {Style.RESET_ALL}").strip()
-                if choice == '1':
-                    await self.export_signals('csv')
-                    await asyncio.sleep(2)
-                elif choice == '2':
-                    await self.export_signals('json')
-                    await asyncio.sleep(2)
-                elif choice == '3':
-                    await self.export_trades('csv')
-                    await asyncio.sleep(2)
-                elif choice == '4':
-                    await self.export_trades('json')
-                    await asyncio.sleep(2)
-                elif choice == '5':
-                    await self.export_stats()
-                    await asyncio.sleep(2)
-                elif choice == '6':
-                    await self.export_all()
-                    await asyncio.sleep(2)
-                elif choice == '0':
-                    break
-            except KeyboardInterrupt:
-                break
-
     async def get_current_price(self, symbol: str) -> Optional[float]:
-        """🔧 ФАЗА 1.5.2: Мгновенное получение цены из WebSocket"""
-        # Сначала пробуем WebSocket (мгновенно)
         if self.websocket:
             try:
                 price = self.websocket.get_latest_price(symbol)
@@ -611,14 +361,12 @@ class ThreeScreenMonitor:
             except Exception:
                 pass
 
-        # Затем кэш
         cache_key = f"price_{symbol}"
         if cache_key in self._price_cache:
             cached_price, cached_time = self._price_cache[cache_key]
             if (datetime.now() - cached_time).total_seconds() < self._price_cache_ttl:
                 return cached_price
 
-        # Только если ничего не помогло — API
         if self.data_provider:
             try:
                 price = await self.data_provider.get_current_price(symbol)
@@ -626,7 +374,7 @@ class ThreeScreenMonitor:
                     self._price_cache[cache_key] = (price, datetime.now())
                 return price
             except Exception as e:
-                logger.error(f"❌ Ошибка получения цены {symbol}: {e}")
+                logger.error(f"Error getting price for {symbol}: {e}")
 
         return None
 
@@ -641,16 +389,24 @@ class ThreeScreenMonitor:
         }
 
         try:
+            # 1. Получаем PnL из закрытых сделок
+            db_pnl = 0
+            if self.trade_repo:
+                closed_trades = await self.trade_repo.get_closed_trades(limit=1000)
+                db_pnl = sum(t.get('pnl', 0) for t in closed_trades)
+                state['total_pnl'] = db_pnl
+
+            # 2. Текущий баланс = начальный + PnL
+            state['current_balance'] = self.starting_balance + db_pnl
+
+            # 3. Маржа по открытым позициям
             if self.paper_account:
                 await self.paper_account.cleanup_expired_reservations()
-
-                state['current_balance'] = await self.paper_account.get_balance()
                 positions = await self.paper_account.get_open_positions()
                 for pos in positions.values():
                     state['used_margin'] += pos.margin
-                stats = await self.paper_account.get_statistics()
-                state['total_pnl'] = stats.get('total_pnl', 0)
 
+            # 4. Резерв под WATCH (только активные)
             if self.signal_repo:
                 watch_signals = await self.signal_repo.get_watch_signals_with_reserve()
                 for watch in watch_signals:
@@ -658,12 +414,273 @@ class ThreeScreenMonitor:
                     if reserved is not None:
                         state['reserved_for_watch'] += float(reserved)
 
+            # 5. Доступно = текущий баланс - маржа - резерв
             state['available'] = state['current_balance'] - state['used_margin'] - state['reserved_for_watch']
 
         except Exception as e:
             logger.error(f"❌ Ошибка получения состояния счёта: {e}")
 
         return state
+
+    async def display_signal_details(self, signal_id: int):
+        """Детальная информация о сигнале с полным блоком позиции"""
+        try:
+            if not self.signal_repo:
+                print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
+                return
+
+            signal = await self.signal_repo.get_signal_by_id(signal_id)
+            if not signal:
+                print(f"{Fore.RED}❌ Сигнал #{signal_id} не найден{Style.RESET_ALL}")
+                input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
+                return
+
+            current_price = await self.get_current_price(signal.get('symbol', ''))
+            if not current_price:
+                current_price = signal.get('entry_price', 0)
+
+            trade = None
+            if self.trade_repo:
+                trade = await self.trade_repo.get_trade_by_signal_id(signal_id)
+
+            self.clear_screen()
+
+            symbol = signal.get('symbol', 'N/A')
+            direction = signal.get('direction', '')
+            status = signal.get('status', '')
+            entry_type = signal.get('entry_type', 'LEGACY')
+            zone_low = signal.get('zone_low', 0)
+            zone_high = signal.get('zone_high', 0)
+            screen2_score = signal.get('screen2_score', 0)
+            expected_pattern = signal.get('expected_pattern', '-')
+            trigger_pattern = signal.get('trigger_pattern', '-')
+            entry_price = signal.get('entry_price', 0)
+            stop_loss = signal.get('stop_loss', 0)
+            take_profit = signal.get('take_profit', 0)
+            rr_ratio = signal.get('risk_reward_ratio', 0)
+
+            grab_price = signal.get('grab_price', None)
+            grab_time = signal.get('grab_time', None)
+            grab_timeframe = signal.get('grab_timeframe', 'M15')
+            fvg_zones = signal.get('fvg_zones', [])
+
+            import json
+            liquidity_pools_raw = signal.get('liquidity_pools', '[]')
+            if isinstance(liquidity_pools_raw, str):
+                liquidity_pools = json.loads(liquidity_pools_raw) if liquidity_pools_raw else []
+            else:
+                liquidity_pools = liquidity_pools_raw
+
+            quantity = 0
+            margin = 0
+            position_value = 0
+            leverage = signal.get('leverage', 10)
+            commission_open = 0
+            commission_close = 0
+
+            if trade:
+                quantity = trade.get('quantity', 0)
+                margin = trade.get('margin', 0)
+                position_value = trade.get('position_value', 0)
+                commission_open = trade.get('commission_open', 0)
+                commission_close = trade.get('commission_close', 0)
+            elif status == 'ACTIVE':
+                position_size = signal.get('position_size', 0)
+                if entry_price > 0 and position_size > 0:
+                    quantity = position_size
+                    position_value = quantity * entry_price
+                    margin = position_value / leverage
+
+            position_multiplier = 1.0 if entry_type == 'SNIPER' else 0.75 if entry_type == 'TREND' else 0.5
+
+            print(f"{Fore.CYAN}{Style.BRIGHT}{'═' * 90}{Style.RESET_ALL}")
+            if status == 'ACTIVE':
+                print(
+                    f"{Fore.CYAN}{Style.BRIGHT}{' ' * 30}ПОЗИЦИЯ #{signal_id}: {symbol} [{entry_type}] — АКТИВНА{Style.RESET_ALL}")
+            elif status == 'CLOSED':
+                print(
+                    f"{Fore.CYAN}{Style.BRIGHT}{' ' * 30}ПОЗИЦИЯ #{signal_id}: {symbol} [{entry_type}] — ЗАКРЫТА{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.CYAN}{Style.BRIGHT}{' ' * 30}АНАЛИЗ {symbol} [{entry_type}]{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}{Style.BRIGHT}{'═' * 90}{Style.RESET_ALL}\n")
+
+            # ========== ДЛЯ ACTIVE ==========
+            if status == 'ACTIVE':
+                print(f"{Fore.YELLOW}💰 ТОРГОВЫЕ ПАРАМЕТРЫ{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                print(f"  Направление:        {'▲ BUY' if direction == 'BUY' else '▼ SELL'}")
+                print(f"  Entry price:        {self.format_price(entry_price)}")
+                if signal.get('created_time'):
+                    print(f"  Время входа:        {self.format_datetime(signal.get('created_time'))}")
+                print(f"  Stop Loss:          {self.format_price(stop_loss)}")
+                print(f"  Take Profit:        {self.format_price(take_profit)}")
+                print()
+
+                print(f"{Fore.YELLOW}📈 ПОЗИЦИЯ{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                print(f"  Размер позиции:     {position_multiplier:.0%} (от стандарта)")
+                print(f"  Маржа (залог):      {margin:.2f} USDT")
+                print(f"  Стоимость позиции:  {position_value:.2f} USDT (с плечом {leverage:.0f}x)")
+                print(f"  Плечо:              {leverage:.0f}x")
+                print(f"  Количество:         {quantity:.4f} {symbol}")
+                print()
+
+                print(f"{Fore.YELLOW}📊 СТАТУС ПОЗИЦИИ{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                if current_price > 0 and entry_price > 0:
+                    if direction == 'BUY':
+                        pnl = (current_price - entry_price) * quantity if quantity > 0 else 0
+                        pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+                        to_sl = (stop_loss - current_price) * quantity if quantity > 0 else 0
+                        to_tp = (take_profit - current_price) * quantity if quantity > 0 else 0
+                        sl_dist = abs(stop_loss - current_price) / current_price * 100
+                        tp_dist = abs(take_profit - current_price) / current_price * 100
+                    else:
+                        pnl = (entry_price - current_price) * quantity if quantity > 0 else 0
+                        pnl_pct = ((entry_price - current_price) / entry_price * 100) if entry_price > 0 else 0
+                        to_sl = (current_price - stop_loss) * quantity if quantity > 0 else 0
+                        to_tp = (current_price - take_profit) * quantity if quantity > 0 else 0
+                        sl_dist = abs(stop_loss - current_price) / current_price * 100
+                        tp_dist = abs(take_profit - current_price) / current_price * 100
+
+                    print(f"  Текущая цена:      {self.format_price(current_price)} ({pnl_pct:+.2f}%)")
+                    print()
+                    print(f"  До Stop Loss:      {self.format_price(stop_loss)} ({sl_dist:.2f}%) → {to_sl:+.2f} USDT")
+                    print(f"  До Take Profit:    {self.format_price(take_profit)} ({tp_dist:.2f}%) → {to_tp:+.2f} USDT")
+                    print()
+                    print(f"  Текущий PnL:       {self.format_pnl(pnl)} ({pnl_pct:+.2f}%)")
+                    print()
+
+                print(f"{Fore.YELLOW}💰 КОМИССИИ{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                print(f"  За открытие:        {commission_open:.4f} USDT")
+                print(f"  За закрытие:        {commission_close:.4f} USDT (ожидается)")
+                print()
+
+            # ========== ДЛЯ CLOSED ==========
+            elif status == 'CLOSED' and trade:
+                close_price = trade.get('close_price', 0)
+                pnl = trade.get('pnl', 0)
+                pnl_pct = trade.get('pnl_percent', 0)
+                close_reason = trade.get('close_reason', '-')
+
+                print(f"{Fore.YELLOW}💰 ТОРГОВЫЕ ПАРАМЕТРЫ{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                print(f"  Направление:        {'▲ BUY' if direction == 'BUY' else '▼ SELL'}")
+                print(f"  Entry price:        {self.format_price(entry_price)}")
+                if signal.get('created_time'):
+                    print(f"  Время входа:        {self.format_datetime(signal.get('created_time'))}")
+                print(f"  Stop Loss:          {self.format_price(stop_loss)}")
+                print(f"  Take Profit:        {self.format_price(take_profit)}")
+                print()
+
+                print(f"{Fore.YELLOW}📈 ПОЗИЦИЯ{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                print(f"  Размер позиции:     {position_multiplier:.0%} (от стандарта)")
+                print(f"  Маржа (залог):      {margin:.2f} USDT")
+                print(f"  Стоимость позиции:  {position_value:.2f} USDT (с плечом {leverage:.0f}x)")
+                print(f"  Плечо:              {leverage:.0f}x")
+                print(f"  Количество:         {quantity:.4f} {symbol}")
+                print()
+
+                print(f"{Fore.YELLOW}💰 КОМИССИИ{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                print(f"  За открытие:        {commission_open:.4f} USDT")
+                print(f"  За закрытие:        {commission_close:.4f} USDT")
+                total_commission = commission_open + commission_close
+                print(f"  Всего:              {total_commission:.4f} USDT")
+                print()
+
+                print(f"{Fore.YELLOW}📊 РЕЗУЛЬТАТ СДЕЛКИ{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                print(f"  Цена входа:         {self.format_price(entry_price)}")
+                print(f"  Цена выхода:        {self.format_price(close_price)}")
+                print(f"  Разница:            {close_price - entry_price:+.2f} USDT")
+                print(f"  Комиссии:           {total_commission:.4f} USDT")
+                print(f"  Итоговый PnL:       {self.format_pnl(pnl)} ({pnl_pct:+.2f}%)")
+                print(f"  Причина закрытия:   {close_reason}")
+                if signal.get('created_time') and trade.get('closed_at'):
+                    opened = self.utc_to_local(signal.get('created_time'))
+                    closed = self.utc_to_local(trade.get('closed_at'))
+                    dur = closed - opened
+                    print(f"  Время в сделке:     {dur.seconds // 3600}ч {(dur.seconds % 3600) // 60}м")
+                print()
+
+            # ========== ДЛЯ WATCH ==========
+            elif status == 'WATCH':
+                print(f"{Fore.YELLOW}📊 СТАТУС ОЖИДАНИЯ{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                print(f"  Тип сигнала:       {entry_type}")
+                print(f"  Зона входа:        {self.format_price(zone_low)} - {self.format_price(zone_high)}")
+                print(f"  Score Screen2:     {self.format_score(screen2_score)}")
+                print(f"  Ожидаемый паттерн: {expected_pattern}")
+                print()
+
+                if current_price > 0 and zone_low > 0 and zone_high > 0:
+                    if zone_low <= current_price <= zone_high:
+                        print(f"  Текущая цена:      {self.format_price(current_price)} (В ЗОНЕ)")
+                    elif current_price < zone_low:
+                        diff = (zone_low - current_price) / zone_low * 100
+                        print(f"  Текущая цена:      {self.format_price(current_price)} (НИЖЕ зоны на {diff:.2f}%)")
+                    else:
+                        diff = (current_price - zone_high) / zone_high * 100
+                        print(f"  Текущая цена:      {self.format_price(current_price)} (ВЫШЕ зоны на {diff:.2f}%)")
+
+                if entry_type == 'SNIPER':
+                    pool_price = 0
+                    for p in liquidity_pools:
+                        if isinstance(p, dict) and p.get('type') in ('SELL_SIDE', 'BUY_SIDE'):
+                            pool_price = p.get('price', 0)
+                            break
+
+                    print(f"\n{Fore.YELLOW}🎯 SNIPER УСЛОВИЯ{Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+                    if pool_price > 0:
+                        print(f"  Пул ликвидности:    {self.format_price(pool_price)}")
+                        if current_price < pool_price:
+                            print(f"  Цена относительно:  НИЖЕ пула")
+                        elif current_price > pool_price:
+                            print(f"  Цена относительно:  ВЫШЕ пула")
+                        else:
+                            print(f"  Цена относительно:  НА УРОВНЕ пула")
+                    print(f"  Для входа нужен:   прокол пула ликвидности и возврат в FVG")
+                print()
+
+            # ========== АНАЛИТИЧЕСКАЯ ИНФОРМАЦИЯ (ДЛЯ ВСЕХ) ==========
+            print(f"{Fore.YELLOW}📊 ДЕТАЛИ АНАЛИЗА{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
+
+            trend_direction = signal.get('trend_direction', '-')
+            adx = signal.get('adx', 0)
+            print(f"  D1 тренд:           {trend_direction} (ADX: {adx:.1f})")
+
+            if fvg_zones:
+                print(f"\n{Fore.CYAN}  FVG зоны:{Style.RESET_ALL}")
+                for i, fvg in enumerate(fvg_zones[:3], 1):
+                    fvg_type = "Бычий" if fvg.get('type') == 'bullish' else "Медвежий"
+                    fvg_low = fvg.get('low', 0)
+                    fvg_high = fvg.get('high', 0)
+                    fvg_strength = fvg.get('strength', 'WEAK')
+                    print(
+                        f"    {i}. {fvg_type}: {self.format_price(fvg_low)} - {self.format_price(fvg_high)} [{fvg_strength}]")
+
+            if liquidity_pools and entry_type == 'SNIPER':
+                print(f"\n{Fore.CYAN}  Пулы ликвидности:{Style.RESET_ALL}")
+                for i, p in enumerate(liquidity_pools[:3], 1):
+                    if isinstance(p, dict):
+                        pool_type = "SELL_SIDE" if p.get('type') == 'SELL_SIDE' else "BUY_SIDE"
+                        pool_price = p.get('price', 0)
+                        touches = p.get('touches', 0)
+                        print(f"    {i}. {pool_type}: {self.format_price(pool_price)} ({touches} касаний)")
+
+            print(f"\n{Fore.CYAN}{'═' * 90}{Style.RESET_ALL}")
+            input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Ошибка: {e}{Style.RESET_ALL}")
+            import traceback
+            traceback.print_exc()
+            input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
 
     async def display_trades_table(self):
         """Отображение таблицы сделок"""
@@ -696,6 +713,10 @@ class ThreeScreenMonitor:
                 elif pnl < 0:
                     losing += 1
 
+                commission_open = trade.get('commission_open', 0)
+                commission_close = trade.get('commission_close', 0)
+                total_commission = commission_open + commission_close
+
                 table_data.append([
                     str(trade.get('id', '')),
                     trade.get('symbol', ''),
@@ -704,10 +725,12 @@ class ThreeScreenMonitor:
                     self.format_price(trade.get('close_price', 0)),
                     self.format_pnl(pnl),
                     f"{trade.get('pnl_percent', 0):+.2f}%" if trade.get('pnl_percent') else "-",
+                    f"{total_commission:.4f}",
+                    trade.get('close_reason', '-'),
                     self.format_datetime(trade.get('closed_at', ''))
                 ])
 
-            headers = ["ID", "Монета", "Напр", "Entry", "Exit", "PnL", "PnL%", "Закрыта"]
+            headers = ["ID", "Монета", "Напр", "Entry", "Exit", "PnL", "PnL%", "Комисс", "Причина", "Закрыта"]
             table = self.create_table(headers, table_data)
             print(table)
 
@@ -724,24 +747,150 @@ class ThreeScreenMonitor:
             print(f"{Fore.RED}❌ Ошибка: {e}{Style.RESET_ALL}")
             input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
 
+    async def display_all_signals(self):
+        """Таблица всех сигналов (с SL/TP)"""
+        try:
+            if not self.signal_repo:
+                print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
+                return
+
+            signals = await self.signal_repo.get_signals_with_trades(limit=200)
+            self.clear_screen()
+            self.print_header("ВСЕ СИГНАЛЫ")
+
+            if not signals:
+                print(f"{Fore.YELLOW}📭 Нет сигналов{Style.RESET_ALL}")
+            else:
+                table_data = []
+                symbols_to_subscribe = []
+
+                for signal in signals:
+                    signal_id = signal.get('id', '')
+                    symbol = signal.get('symbol', '')
+                    status = signal.get('status', '')
+                    entry_type = signal.get('entry_type', 'LEGACY')
+                    direction = signal.get('direction', '')
+                    entry_price = signal.get('entry_price', 0)
+                    stop_loss = signal.get('stop_loss', 0)
+                    take_profit = signal.get('take_profit', 0)
+                    zone_low = signal.get('zone_low', 0)
+                    zone_high = signal.get('zone_high', 0)
+                    score = signal.get('screen2_score', 0)
+                    rr_ratio = signal.get('risk_reward_ratio', 0)
+                    trade_pnl = signal.get('trade_pnl')
+                    position_size = signal.get('position_size', 0)
+
+                    symbols_to_subscribe.append(symbol)
+
+                    # Текущая цена
+                    current_price = await self.get_current_price(symbol)
+
+                    # Расчёт PnL для ACTIVE
+                    if status.upper() == 'ACTIVE' and current_price and current_price > 0 and entry_price > 0:
+                        if direction == 'BUY':
+                            pnl = (current_price - entry_price) * position_size
+                        else:
+                            pnl = (entry_price - current_price) * position_size
+                        pnl_display = self.format_pnl(pnl)
+                    else:
+                        pnl_display = self.format_pnl(trade_pnl) if trade_pnl is not None else "-"
+
+                    # Entry, SL, TP показываем для ACTIVE и CLOSED
+                    if status.upper() in ['ACTIVE', 'CLOSED']:
+                        entry_display = self.format_price(entry_price) if entry_price > 0 else "-"
+                        sl_display = self.format_price(stop_loss) if stop_loss > 0 else "-"
+                        tp_display = self.format_price(take_profit) if take_profit > 0 else "-"
+                    else:
+                        entry_display = "-"
+                        sl_display = "-"
+                        tp_display = "-"
+
+                    # Зона
+                    if zone_low > 0 and zone_high > 0:
+                        zone_display = self.format_zone(zone_low, zone_high)
+                    else:
+                        zone_display = "-"
+
+                    # Текущая цена с индикатором
+                    if current_price and current_price > 0:
+                        if zone_low <= current_price <= zone_high:
+                            price_display = f"{Fore.YELLOW}{self.format_price(current_price)}*{Style.RESET_ALL}"
+                        else:
+                            price_display = self.format_price(current_price)
+                    else:
+                        price_display = "-"
+
+                    time_str = self.format_time(signal.get('created_time', ''))
+                    date_str = self.format_date(signal.get('created_time', ''))
+
+                    # Направление
+                    dir_display = "BUY" if direction == 'BUY' else "SELL" if direction == 'SELL' else "-"
+
+                    table_data.append([
+                        str(signal_id),
+                        symbol,
+                        dir_display,
+                        self.format_status(status),
+                        self.format_entry_type(entry_type),
+                        entry_display,
+                        sl_display,
+                        tp_display,
+                        zone_display,
+                        self.format_score(score),
+                        price_display,
+                        pnl_display,
+                        self.format_rr_ratio(rr_ratio) if rr_ratio else "-",
+                        f"{date_str} {time_str}"
+                    ])
+
+                if self.websocket and symbols_to_subscribe:
+                    try:
+                        self.websocket.add_symbols(symbols_to_subscribe)
+                    except Exception:
+                        pass
+
+                headers = ["ID", "Монета", "Напр", "Статус", "Тип", "Entry", "SL", "TP", "Зона", "Score", "Цена", "PnL",
+                           "R/R", "Время"]
+                table = self.create_table(headers, table_data)
+                print(table)
+
+                # Статистика
+                active_count = sum(1 for s in signals if s.get('status', '').lower() in ['active'])
+                watch_count = sum(1 for s in signals if s.get('signal_subtype', '') == 'WATCH')
+                m15_count = sum(1 for s in signals if s.get('signal_subtype', '') == 'M15')
+                sniper_count = sum(1 for s in signals if s.get('entry_type', '') == 'SNIPER')
+                trend_count = sum(1 for s in signals if s.get('entry_type', '') == 'TREND')
+                legacy_count = sum(1 for s in signals if s.get('entry_type', '') == 'LEGACY')
+                buy_count = sum(1 for s in signals if s.get('direction', '').lower() == 'buy')
+                sell_count = sum(1 for s in signals if s.get('direction', '').lower() == 'sell')
+
+                print(f"\n{Fore.CYAN}📈 СТАТИСТИКА:{Style.RESET_ALL}")
+                print(f"  Всего сигналов: {len(signals)}")
+                print(f"  Активных: {active_count}")
+                print(f"  WATCH: {watch_count} | M15: {m15_count}")
+                print(f"  SNIPER: {sniper_count} | TREND: {trend_count} | LEGACY: {legacy_count}")
+                print(f"  BUY: {buy_count} | SELL: {sell_count}")
+
+        except Exception as e:
+            print(f"{Fore.RED}❌ Ошибка: {e}{Style.RESET_ALL}")
+        input(f"\n{Fore.GREEN}Нажмите Enter для продолжения...{Style.RESET_ALL}")
+
     async def display_realtime_monitor(self):
-        """🔧 ФАЗА 1.5.2: Реалтайм монитор без моргания"""
+        """Реалтайм монитор (таблица с автообновлением)"""
         self._shutdown = False
 
-        # Предварительно загружаем WebSocket цены
         if self.websocket:
             try:
-                # Запускаем WebSocket в фоне (если ещё не запущен)
                 if not self.websocket.running:
                     asyncio.create_task(self.websocket.connect())
-                    await asyncio.sleep(1)  # Даём время на подключение
+                    await asyncio.sleep(1)
             except Exception:
                 pass
 
         try:
             while not self._shutdown:
                 self.clear_screen()
-                self.print_header("THREE SCREEN ANALYZER - РЕАЛТАЙМ МОНИТОР (v1.5.2)")
+                self.print_header("THREE SCREEN ANALYZER - РЕАЛТАЙМ МОНИТОР (v2.1)")
 
                 trading_mode = self.config.get('trading_mode', 'pro')
                 mode_color = Fore.GREEN if trading_mode == 'light' else Fore.CYAN
@@ -752,13 +901,13 @@ class ThreeScreenMonitor:
                     print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
                     break
 
-                signals = await self.signal_repo.get_signals_with_trades(self.settings['signals_limit'])
+                signals = await self.signal_repo.get_signals_with_trades(limit=50)
                 stats = await self.signal_repo.get_database_stats()
                 account_state = await self.get_account_state()
 
                 # Состояние счёта
                 print(f"{Fore.YELLOW}💰 СОСТОЯНИЕ СЧЁТА:{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
                 print(
                     f"  Депозит (начальный):    {Fore.WHITE}{account_state['initial_balance']:.2f} USDT{Style.RESET_ALL}")
                 print(
@@ -774,116 +923,114 @@ class ThreeScreenMonitor:
 
                 # Статистика системы
                 print(f"{Fore.YELLOW}📊 СТАТИСТИКА СИСТЕМЫ:{Style.RESET_ALL}")
-                print(f"   Всего сигналов: {stats.get('total_signals', 0)}")
-                print(f"   WATCH: {stats.get('subtypes_stats', {}).get('WATCH', 0)}")
-                print(f"   M15: {stats.get('subtypes_stats', {}).get('M15', 0)}")
-                print(f"   Активных: {stats.get('active_signals', 0)}")
-                print(f"   BUY: {stats.get('buy_signals', 0)}  |  SELL: {stats.get('sell_signals', 0)}")
-                print(f"   Закрыто сделок: {stats.get('closed_trades', 0)}")
-                print(f"   Общий PnL: {self.format_pnl(stats.get('total_pnl', 0))}")
-                print(f"   Win Rate: {stats.get('win_rate', 0):.1f}%")
-                print(f"   Анализов тренда: {stats.get('total_trends', 0)}")
+                print(f"  Всего сигналов: {stats.get('total_signals', 0)}")
+                print(f"  WATCH: {stats.get('subtypes_stats', {}).get('WATCH', 0)}")
+                print(f"  M15: {stats.get('subtypes_stats', {}).get('M15', 0)}")
+                print(f"  Активных: {stats.get('active_signals', 0)}")
+                print(f"  BUY: {stats.get('buy_signals', 0)}  |  SELL: {stats.get('sell_signals', 0)}")
+                print(f"  SNIPER: {stats.get('entry_type_stats', {}).get('SNIPER', 0)}")
+                print(f"  TREND: {stats.get('entry_type_stats', {}).get('TREND', 0)}")
+                print(f"  LEGACY: {stats.get('entry_type_stats', {}).get('LEGACY', 0)}")
                 print()
 
                 if not signals:
                     print(f"{Fore.YELLOW}📭 Нет сигналов в базе данных{Style.RESET_ALL}")
                 else:
                     table_data = []
-
-                    # 🔧 ФАЗА 1.5.2: Собираем все символы для WebSocket подписки
                     symbols_to_subscribe = []
 
                     for signal in signals:
                         signal_id = signal.get('id', '')
                         symbol = signal.get('symbol', '')
-                        signal_subtype = signal.get('signal_subtype', '')
-                        direction = signal.get('direction', '')
                         status = signal.get('status', '')
+                        entry_type = signal.get('entry_type', 'LEGACY')
+                        direction = signal.get('direction', '')
+                        entry_price = signal.get('entry_price', 0)
+                        stop_loss = signal.get('stop_loss', 0)
+                        take_profit = signal.get('take_profit', 0)
+                        zone_low = signal.get('zone_low', 0)
+                        zone_high = signal.get('zone_high', 0)
+                        score = signal.get('screen2_score', 0)
+                        rr_ratio = signal.get('risk_reward_ratio', 0)
+                        trade_pnl = signal.get('trade_pnl')
+                        position_size = signal.get('position_size', 0)
 
                         symbols_to_subscribe.append(symbol)
 
-                        # Entry: пусто для WATCH, fill_price для ACTIVE/CLOSED
-                        if status.upper() == 'WATCH':
-                            entry_display = "-"
-                        else:
-                            fill_price = signal.get('fill_price', 0)
-                            if fill_price > 0:
-                                entry_display = self.format_price(fill_price)
-                            else:
-                                entry_display = self.format_price(signal.get('entry_price', 0))
-
-                        zone_low = signal.get('zone_low', 0)
-                        zone_high = signal.get('zone_high', 0)
-                        zone_display = self.format_zone(zone_low, zone_high)
-
-                        score = signal.get('screen2_score', 0)
-                        score_display = self.format_score(score)
-
-                        created_price = signal.get('current_price_at_signal', 0)
-                        created_price_display = self.format_price(created_price) if created_price > 0 else "-"
-
-                        # 🔧 ФАЗА 1.5.2: Мгновенное получение цены
+                        # Текущая цена
                         current_price = await self.get_current_price(symbol)
+
+                        # Расчёт PnL для ACTIVE
+                        if status.upper() == 'ACTIVE' and current_price and current_price > 0 and entry_price > 0:
+                            if direction == 'BUY':
+                                pnl = (current_price - entry_price) * position_size
+                            else:
+                                pnl = (entry_price - current_price) * position_size
+                            pnl_display = self.format_pnl(pnl)
+                        else:
+                            pnl_display = self.format_pnl(trade_pnl) if trade_pnl is not None else "-"
+
+                        # Entry, SL, TP показываем для ACTIVE и CLOSED
+                        if status.upper() in ['ACTIVE', 'CLOSED']:
+                            entry_display = self.format_price(entry_price) if entry_price > 0 else "-"
+                            sl_display = self.format_price(stop_loss) if stop_loss > 0 else "-"
+                            tp_display = self.format_price(take_profit) if take_profit > 0 else "-"
+                        else:
+                            entry_display = "-"
+                            sl_display = "-"
+                            tp_display = "-"
+
+                        # Зона
+                        if zone_low > 0 and zone_high > 0:
+                            zone_display = self.format_zone(zone_low, zone_high)
+                        else:
+                            zone_display = "-"
+
+                        # Текущая цена с индикатором (звездочка если в зоне)
                         if current_price and current_price > 0:
                             if zone_low <= current_price <= zone_high:
-                                current_price_display = f"{Fore.YELLOW}{self.format_price(current_price)}●{Style.RESET_ALL}"
-                                position_display = f"{Fore.YELLOW}● В ЗОНЕ{Style.RESET_ALL}"
-                            elif current_price < zone_low:
-                                current_price_display = f"{Fore.RED}{self.format_price(current_price)}▼{Style.RESET_ALL}"
-                                position_display = f"{Fore.RED}▼ НИЖЕ{Style.RESET_ALL}"
+                                price_display = f"{Fore.YELLOW}{self.format_price(current_price)}*{Style.RESET_ALL}"
                             else:
-                                current_price_display = f"{Fore.GREEN}{self.format_price(current_price)}▲{Style.RESET_ALL}"
-                                position_display = f"{Fore.GREEN}▲ ВЫШЕ{Style.RESET_ALL}"
+                                price_display = self.format_price(current_price)
                         else:
-                            current_price_display = "-"
-                            position_display = "-"
-
-                        sl_price = signal.get('stop_loss', 0)
-                        sl_display = self.format_price(sl_price) if sl_price > 0 else "-"
-
-                        tp_price = signal.get('take_profit', 0)
-                        tp_display = self.format_price(tp_price) if tp_price > 0 else "-"
-
-                        rr_ratio = signal.get('risk_reward_ratio', 0)
-                        rr_display = self.format_rr_ratio(rr_ratio) if rr_ratio else "-"
-
-                        trade_pnl = signal.get('trade_pnl')
-                        pnl_display = self.format_pnl(trade_pnl) if trade_pnl is not None else "-"
+                            price_display = "-"
 
                         time_str = self.format_time(signal.get('created_time', ''))
                         date_str = self.format_date(signal.get('created_time', ''))
 
+                        # Направление для отображения
+                        dir_display = "▲ BUY" if direction == 'BUY' else "▼ SELL" if direction == 'SELL' else "-"
+
                         table_data.append([
                             str(signal_id),
                             symbol,
-                            self.format_screen(signal_subtype),
-                            self.format_direction(direction),
+                            dir_display,
                             self.format_status(status),
+                            self.format_entry_type(entry_type),
                             entry_display,
-                            zone_display,
-                            score_display,
                             sl_display,
                             tp_display,
-                            rr_display,
+                            zone_display,
+                            self.format_score(score),
+                            price_display,
                             pnl_display,
-                            created_price_display,
-                            current_price_display,
+                            self.format_rr_ratio(rr_ratio) if rr_ratio else "-",
                             f"{date_str} {time_str}"
                         ])
 
-                    # 🔧 Подписываем WebSocket на символы
                     if self.websocket and symbols_to_subscribe:
                         try:
                             self.websocket.add_symbols(symbols_to_subscribe)
                         except Exception:
                             pass
 
-                    headers = ["ID", "Монета", "Тип", "Напр", "Статус", "Entry", "Зона", "Score",
-                               "SL", "TP", "R/R", "PnL", "Создана", "Тек. цена", "Время"]
+                    headers = ["ID", "Монета", "Напр", "Статус", "Тип", "Entry", "SL", "TP", "Зона", "Score", "Цена",
+                               "PnL", "R/R", "Время"]
                     table = self.create_table(headers, table_data)
                     print(table)
 
-                print(f"\n{Fore.CYAN}🔄 Автообновление через {self.settings['refresh_interval']} сек...")
+                print(
+                    f"\n{Fore.CYAN}🔄 Автообновление через {self.settings['refresh_interval']} сек...{Style.RESET_ALL}")
                 print(f"{Fore.YELLOW}Нажмите Enter для возврата в меню{Style.RESET_ALL}")
 
                 try:
@@ -897,585 +1044,15 @@ class ThreeScreenMonitor:
         finally:
             self._shutdown = False
 
-    async def display_signal_details(self, signal_id: int):
-        """Детальная информация о сигнале с полным обучающим комментарием"""
-        try:
-            if not self.signal_repo:
-                print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
-                return
-
-            signal = await self.signal_repo.get_signal_by_id(signal_id)
-            if not signal:
-                print(f"{Fore.RED}❌ Сигнал #{signal_id} не найден{Style.RESET_ALL}")
-                input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-                return
-
-            learning_comment = signal.get('learning_comment', '')
-
-            if learning_comment:
-                self.clear_screen()
-                print(learning_comment)
-                input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-                return
-
-            current_price = await self.get_current_price(signal.get('symbol', ''))
-            if not current_price:
-                current_price = signal.get('entry_price', 0)
-
-            trade = None
-            if self.trade_repo:
-                trade = await self.trade_repo.get_trade_by_signal_id(signal_id)
-
-            account_state = await self.get_account_state()
-
-            self.clear_screen()
-
-            symbol = signal.get('symbol', 'N/A')
-            direction = signal.get('direction', '')
-            signal_subtype = signal.get('signal_subtype', '')
-            status = signal.get('status', '')
-            confidence = signal.get('confidence', 0)
-            zone_low = signal.get('zone_low', 0)
-            zone_high = signal.get('zone_high', 0)
-            screen2_score = signal.get('screen2_score', 0)
-            expected_pattern = signal.get('expected_pattern', '—')
-            trigger_pattern = signal.get('trigger_pattern', '—')
-            created_price = signal.get('current_price_at_signal', 0)
-            position_vs_zone = signal.get('position_vs_zone', '')
-
-            print(f"\n{Fore.CYAN}{Style.BRIGHT}{'═' * 90}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}{Style.BRIGHT}                    ДЕТАЛИ СИГНАЛА #{signal_id}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}{Style.BRIGHT}{'═' * 90}{Style.RESET_ALL}\n")
-
-            print(f"{Fore.YELLOW}🎯 ОСНОВНАЯ ИНФОРМАЦИЯ{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
-            print(f"  Монета:             {Fore.WHITE}{symbol}{Style.RESET_ALL}")
-            print(f"  Направление:        {self.format_direction(direction)}")
-            print(f"  Тип сигнала:        {self.format_screen(signal_subtype)}")
-            print(f"  Статус:             {self.format_status(status)}")
-            print(f"  Уверенность:        {self.format_confidence(confidence)}")
-            if created_price > 0:
-                print(f"  Цена при создании:  {Fore.WHITE}{self.format_price(created_price)}{Style.RESET_ALL}")
-            if position_vs_zone:
-                if position_vs_zone == "ABOVE":
-                    pos_text = f"{Fore.GREEN}▲ ВЫШЕ{Style.RESET_ALL}"
-                elif position_vs_zone == "BELOW":
-                    pos_text = f"{Fore.RED}▼ НИЖЕ{Style.RESET_ALL}"
-                else:
-                    pos_text = f"{Fore.YELLOW}● ВНУТРИ{Style.RESET_ALL}"
-                print(f"  Позиция цены:       {pos_text}")
-
-            trend_direction = signal.get('trend_direction', '')
-            trend_strength = signal.get('trend_strength', '')
-            if trend_direction:
-                print(f"\n{Fore.YELLOW}📊 ТРЕНД{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
-                print(f"  Направление D1:     {trend_direction}")
-                if trend_strength:
-                    print(f"  Сила тренда:        {trend_strength}")
-
-            if zone_low > 0 and zone_high > 0:
-                print(f"\n{Fore.YELLOW}🎯 ЗОНА ВХОДА{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
-                print(f"  Нижняя граница:     {Fore.WHITE}{self.format_price(zone_low)}{Style.RESET_ALL}")
-                print(f"  Верхняя граница:    {Fore.WHITE}{self.format_price(zone_high)}{Style.RESET_ALL}")
-                print(f"  Score Screen2:      {self.format_score(screen2_score)}")
-                if expected_pattern and expected_pattern != '—':
-                    print(f"  Ожидаемый паттерн:  {Fore.WHITE}{expected_pattern}{Style.RESET_ALL}")
-
-            if current_price > 0 and zone_low > 0 and zone_high > 0:
-                print(f"\n{Fore.YELLOW}📍 ПОЗИЦИЯ ЦЕНЫ{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
-                print(f"  Текущая цена:       {Fore.WHITE}{self.format_price(current_price)}{Style.RESET_ALL}")
-
-                if current_price < zone_low:
-                    diff_pct = (zone_low - current_price) / zone_low * 100
-                    print(f"  Относительно зоны:  {Fore.RED}НИЖЕ на {diff_pct:.1f}%{Style.RESET_ALL}")
-                elif current_price > zone_high:
-                    diff_pct = (current_price - zone_high) / zone_high * 100
-                    print(f"  Относительно зоны:  {Fore.GREEN}ВЫШЕ на {diff_pct:.1f}%{Style.RESET_ALL}")
-                else:
-                    print(f"  Относительно зоны:  {Fore.YELLOW}● В ЗОНЕ{Style.RESET_ALL}")
-
-            entry_price = signal.get('entry_price', 0)
-            stop_loss = signal.get('stop_loss', 0)
-            take_profit = signal.get('take_profit', 0)
-            rr_ratio = signal.get('risk_reward_ratio')
-
-            if entry_price > 0:
-                print(f"\n{Fore.YELLOW}⚡ ПАРАМЕТРЫ СИГНАЛА{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
-                print(f"  План. цена входа:   {Fore.WHITE}{self.format_price(entry_price)}{Style.RESET_ALL}")
-                if stop_loss and stop_loss > 0:
-                    sl_pct = abs(entry_price - stop_loss) / entry_price * 100
-                    print(
-                        f"  Stop Loss:          {Fore.RED}{self.format_price(stop_loss)} (-{sl_pct:.2f}%){Style.RESET_ALL}")
-                if take_profit and take_profit > 0:
-                    tp_pct = abs(take_profit - entry_price) / entry_price * 100
-                    print(
-                        f"  Take Profit:        {Fore.GREEN}{self.format_price(take_profit)} (+{tp_pct:.2f}%){Style.RESET_ALL}")
-                if rr_ratio is not None and rr_ratio > 0:
-                    print(f"  Risk/Reward:        {self.format_rr_ratio(rr_ratio)}")
-                if trigger_pattern and trigger_pattern != '—':
-                    print(f"  Паттерн-триггер:    {Fore.WHITE}{trigger_pattern}{Style.RESET_ALL}")
-
-            if trade:
-                print(f"\n{Fore.YELLOW}⚡ ФАКТИЧЕСКОЕ ИСПОЛНЕНИЕ{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
-
-                actual_entry = trade.get('entry_price', 0)
-                if actual_entry > 0:
-                    print(f"  Реальная цена входа: {Fore.WHITE}{self.format_price(actual_entry)}{Style.RESET_ALL}")
-
-                quantity = trade.get('quantity', 0)
-                if quantity > 0:
-                    print(f"  Размер позиции:      {quantity:.4f}")
-
-                leverage = trade.get('leverage', 10)
-                if leverage:
-                    print(f"  Плечо:               {leverage:.1f}x")
-
-                margin = trade.get('margin', 0)
-                if margin > 0:
-                    print(f"  Маржа (залог):       {Fore.YELLOW}{margin:.2f} USDT{Style.RESET_ALL}")
-
-                pnl = trade.get('pnl', 0)
-                pnl_pct = trade.get('pnl_percent', 0)
-                if pnl != 0:
-                    pnl_str = self.format_pnl(pnl)
-                    pnl_pct_str = f"{pnl_pct:+.2f}%" if pnl_pct else ""
-                    print(f"  PnL:                 {pnl_str} ({pnl_pct_str})")
-
-                close_reason = trade.get('close_reason', '')
-                if close_reason:
-                    print(f"  Причина закрытия:    {Fore.WHITE}{close_reason}{Style.RESET_ALL}")
-
-            print(f"\n{Fore.YELLOW}⏱ ВРЕМЕННАЯ ШКАЛА{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
-
-            created = signal.get('created_time')
-            if created:
-                print(f"  📝 Сигнал создан:    {self.format_datetime(created)}")
-
-            expiration = signal.get('expiration_time')
-            if expiration:
-                exp_dt = self.utc_to_local(expiration)
-                now_dt = datetime.now() + timedelta(hours=self.timezone_offset)
-                if exp_dt > now_dt:
-                    remaining = exp_dt - now_dt
-                    hours = remaining.seconds // 3600
-                    minutes = (remaining.seconds % 3600) // 60
-                    print(f"  ⏰ Истекает:         {self.format_datetime(expiration)} (через {hours}ч {minutes}м)")
-                else:
-                    print(f"  ⏰ Истёк:            {self.format_datetime(expiration)}")
-
-            if trade and trade.get('opened_at'):
-                print(f"  ⚡ Позиция открыта:  {self.format_datetime(trade.get('opened_at'))}")
-
-            if trade and trade.get('closed_at'):
-                print(f"  🔒 Позиция закрыта:  {self.format_datetime(trade.get('closed_at'))}")
-
-            print(f"\n{Fore.YELLOW}💰 СОСТОЯНИЕ СЧЁТА{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
-            print(f"  Депозит (начальный): {Fore.WHITE}{account_state['initial_balance']:.2f} USDT{Style.RESET_ALL}")
-            print(f"  Текущий баланс:      {Fore.WHITE}{account_state['current_balance']:.2f} USDT{Style.RESET_ALL}")
-            print(f"  Использовано маржи:  {Fore.YELLOW}{account_state['used_margin']:.2f} USDT{Style.RESET_ALL}")
-            print(
-                f"  Зарезервировано:     {Fore.YELLOW}{account_state['reserved_for_watch']:.2f} USDT{Style.RESET_ALL}")
-            print(
-                f"  Доступно средств:    {Fore.GREEN if account_state['available'] > 0 else Fore.RED}{account_state['available']:.2f} USDT{Style.RESET_ALL}")
-
-            rejection_reason = signal.get('rejection_reason', '')
-            if status.upper() == 'REJECTED' and rejection_reason:
-                print(f"\n{Fore.RED}❌ ПРИЧИНА ОТКЛОНЕНИЯ{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
-                print(f"  {Fore.RED}{rejection_reason}{Style.RESET_ALL}")
-
-            print(f"\n{Fore.CYAN}{'═' * 90}{Style.RESET_ALL}")
-            input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-
-        except Exception as e:
-            print(f"{Fore.RED}❌ Ошибка при отображении деталей: {e}{Style.RESET_ALL}")
-            import traceback
-            traceback.print_exc()
-            input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-
-    async def display_all_signals(self):
-        """🔧 ФАЗА 1.5.2: Таблица всех сигналов без задержки"""
-        try:
-            if not self.signal_repo:
-                print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
-                return
-
-            monitor_config = self.config.get('monitor', {})
-            signals_limit = monitor_config.get('signals_limit', 200)
-
-            signals = await self.signal_repo.get_signals(limit=signals_limit)
-            self.clear_screen()
-            self.print_header("ВСЕ СИГНАЛЫ")
-
-            if not signals:
-                print(f"{Fore.YELLOW}📭 Нет сигналов{Style.RESET_ALL}")
-            else:
-                table_data = []
-
-                # 🔧 Собираем символы для WebSocket
-                symbols_to_subscribe = []
-
-                for signal in signals:
-                    signal_id = signal.get('id', '')
-                    symbol = signal.get('symbol', '')
-                    signal_subtype = signal.get('signal_subtype', '')
-                    direction = signal.get('direction', '')
-                    status = signal.get('status', '')
-
-                    symbols_to_subscribe.append(symbol)
-
-                    if status.upper() == 'WATCH':
-                        entry_display = "-"
-                    else:
-                        entry_display = self.format_price(signal.get('entry_price', 0))
-
-                    zone_low = signal.get('zone_low', 0)
-                    zone_high = signal.get('zone_high', 0)
-                    zone_display = self.format_zone(zone_low, zone_high)
-
-                    score = signal.get('screen2_score', 0)
-                    score_display = self.format_score(score)
-
-                    created_price = signal.get('current_price_at_signal', 0)
-                    created_price_display = self.format_price(created_price) if created_price > 0 else "-"
-
-                    # 🔧 Мгновенное получение цены
-                    current_price = await self.get_current_price(symbol)
-                    if current_price and current_price > 0:
-                        if zone_low <= current_price <= zone_high:
-                            current_price_display = f"{Fore.YELLOW}{self.format_price(current_price)}●{Style.RESET_ALL}"
-                        elif current_price < zone_low:
-                            current_price_display = f"{Fore.RED}{self.format_price(current_price)}▼{Style.RESET_ALL}"
-                        else:
-                            current_price_display = f"{Fore.GREEN}{self.format_price(current_price)}▲{Style.RESET_ALL}"
-                    else:
-                        current_price_display = "-"
-
-                    trade_pnl = signal.get('trade_pnl')
-                    pnl_display = self.format_pnl(trade_pnl) if trade_pnl is not None else "-"
-
-                    rr_ratio = signal.get('risk_reward_ratio', 0)
-                    rr_display = self.format_rr_ratio(rr_ratio) if rr_ratio else "-"
-
-                    time_str = self.format_time(signal.get('created_time', ''))
-                    date_str = self.format_date(signal.get('created_time', ''))
-
-                    table_data.append([
-                        str(signal_id),
-                        symbol,
-                        self.format_screen(signal_subtype),
-                        self.format_direction(direction),
-                        self.format_status(status),
-                        entry_display,
-                        zone_display,
-                        score_display,
-                        created_price_display,
-                        current_price_display,
-                        pnl_display,
-                        rr_display,
-                        f"{date_str} {time_str}"
-                    ])
-
-                # 🔧 Подписываем WebSocket
-                if self.websocket and symbols_to_subscribe:
-                    try:
-                        self.websocket.add_symbols(symbols_to_subscribe)
-                    except Exception:
-                        pass
-
-                headers = ["ID", "Монета", "Тип", "Напр", "Статус", "Entry", "Зона", "Score",
-                           "Цена при создании", "Тек. цена", "PnL", "R/R", "Время"]
-                table = self.create_table(headers, table_data)
-                print(table)
-
-                active_count = sum(1 for s in signals if s.get('status', '').lower() in ['watch', 'active'])
-                watch_count = sum(1 for s in signals if s.get('signal_subtype', '') == 'WATCH')
-                m15_count = sum(1 for s in signals if s.get('signal_subtype', '') == 'M15')
-                buy_count = sum(1 for s in signals if s.get('direction', '').lower() == 'buy')
-                sell_count = sum(1 for s in signals if s.get('direction', '').lower() == 'sell')
-
-                print(f"\n{Fore.CYAN}📈 СТАТИСТИКА:{Style.RESET_ALL}")
-                print(f"   Всего сигналов: {len(signals)}")
-                print(f"   Активных: {active_count}")
-                print(f"   WATCH: {watch_count} | M15: {m15_count}")
-                print(f"   BUY: {buy_count} | SELL: {sell_count}")
-
-        except Exception as e:
-            print(f"{Fore.RED}❌ Ошибка: {e}{Style.RESET_ALL}")
-        input(f"\n{Fore.GREEN}Нажмите Enter для продолжения...{Style.RESET_ALL}")
-
     @staticmethod
     async def _wait_for_enter():
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, input)
 
-    async def display_database_stats(self):
-        if not self.signal_repo:
-            print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
-            return
-
-        stats = await self.signal_repo.get_database_stats()
-        self.clear_screen()
-        self.print_header("СТАТИСТИКА БАЗЫ ДАННЫХ")
-
-        print(f"{Fore.YELLOW}📊 СТАТИСТИКА СИГНАЛОВ:{Style.RESET_ALL}")
-        print(f"  Всего сигналов:      {stats.get('total_signals', 0)}")
-        print(f"  WATCH:               {stats.get('subtypes_stats', {}).get('WATCH', 0)}")
-        print(f"  M15:                 {stats.get('subtypes_stats', {}).get('M15', 0)}")
-        print(f"  Активных:            {stats.get('active_signals', 0)}")
-        print(f"  BUY:                 {stats.get('buy_signals', 0)}")
-        print(f"  SELL:                {stats.get('sell_signals', 0)}")
-
-        print(f"\n{Fore.YELLOW}📈 СТАТИСТИКА СДЕЛОК:{Style.RESET_ALL}")
-        print(f"  Закрытых сделок:      {stats.get('closed_trades', 0)}")
-        print(f"  Общий PnL:            {self.format_pnl(stats.get('total_pnl', 0))}")
-        print(f"  Win Rate:             {stats.get('win_rate', 0):.1f}%")
-
-        print(f"\n{Fore.YELLOW}📊 СТАТИСТИКА ТРЕНДОВ:{Style.RESET_ALL}")
-        print(f"  Всего анализов:       {stats.get('total_trends', 0)}")
-
-        print(f"\n{Fore.CYAN}{'=' * 80}{Style.RESET_ALL}")
-        input(f"\n{Fore.GREEN}Нажмите Enter для продолжения...{Style.RESET_ALL}")
-
-    async def display_trend_analysis(self):
-        """Отображение анализа тренда D1"""
-        try:
-            if not self.signal_repo:
-                print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
-                input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-                return
-
-            trends = await self.signal_repo.get_latest_trends(limit=50)
-            trends = sorted(trends, key=lambda x: x.get('symbol', ''))
-
-            self.clear_screen()
-            self.print_header("📊 АНАЛИЗ ТРЕНДА (D1)")
-
-            if not trends:
-                print(f"{Fore.YELLOW}📭 Нет данных о трендах{Style.RESET_ALL}")
-                input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-                return
-
-            bull_count = sum(1 for t in trends if t.get('trend_direction') == 'BULL')
-            bear_count = sum(1 for t in trends if t.get('trend_direction') == 'BEAR')
-            sideways_count = sum(1 for t in trends if t.get('trend_direction') == 'SIDEWAYS')
-            strong_trends = sum(1 for t in trends if t.get('adx', 0) > 25)
-
-            print(f"{Fore.YELLOW}📈 СТАТИСТИКА ТРЕНДОВ:{Style.RESET_ALL}")
-            print(
-                f"   BULL: {Fore.GREEN}{bull_count}{Style.RESET_ALL} | BEAR: {Fore.RED}{bear_count}{Style.RESET_ALL} | SIDEWAYS: {Fore.YELLOW}{sideways_count}{Style.RESET_ALL}")
-            print(f"   Сильных трендов (ADX > 25): {Fore.CYAN}{strong_trends}{Style.RESET_ALL} из {len(trends)}")
-            print()
-
-            table_data = []
-            for idx, trend in enumerate(trends, 1):
-                symbol = trend.get('symbol', '')
-                db_id = trend.get('id', '')
-                direction = trend.get('trend_direction', '')
-                adx = trend.get('adx', 0)
-                ema20 = trend.get('ema20', 0)
-                ema50 = trend.get('ema50', 0)
-                macd = trend.get('macd_line', 0)
-                created = trend.get('created_time', '')
-
-                if direction == 'BULL':
-                    dir_display = f"{Fore.GREEN}▲ BULL{Style.RESET_ALL}"
-                elif direction == 'BEAR':
-                    dir_display = f"{Fore.RED}▼ BEAR{Style.RESET_ALL}"
-                else:
-                    dir_display = f"{Fore.YELLOW}● SIDEWAYS{Style.RESET_ALL}"
-
-                if adx > 25:
-                    adx_display = f"{Fore.GREEN}{adx:.1f}{Style.RESET_ALL}"
-                elif adx > 20:
-                    adx_display = f"{Fore.YELLOW}{adx:.1f}{Style.RESET_ALL}"
-                else:
-                    adx_display = f"{Fore.RED}{adx:.1f}{Style.RESET_ALL}"
-
-                if macd > 0:
-                    macd_display = f"{Fore.GREEN}+{macd:.2f}{Style.RESET_ALL}"
-                elif macd < 0:
-                    macd_display = f"{Fore.RED}{macd:.2f}{Style.RESET_ALL}"
-                else:
-                    macd_display = "0.00"
-
-                table_data.append([
-                    str(idx),
-                    symbol,
-                    dir_display,
-                    adx_display,
-                    self.format_price(ema20),
-                    self.format_price(ema50),
-                    macd_display,
-                    self.format_time(created),
-                    str(db_id)
-                ])
-
-            headers = ["#", "Монета", "Тренд", "ADX", "EMA20", "EMA50", "MACD", "Время", "DB_ID"]
-            table = self.create_table(headers, table_data)
-            print(table)
-
-            print(f"\n{Fore.CYAN}{'=' * 80}{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}💡 Для просмотра деталей введите НОМЕР строки (#) или 0 для возврата{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}📊 Всего монет в анализе: {len(trends)}{Style.RESET_ALL}")
-
-            try:
-                choice = input(f"\n{Fore.CYAN}🔢 Номер строки (0 - назад): {Style.RESET_ALL}").strip()
-                if choice and choice != '0':
-                    row_num = int(choice)
-                    if 1 <= row_num <= len(table_data):
-                        db_id = int(table_data[row_num - 1][8])
-                        await self.display_trend_details(db_id)
-                        return
-                    else:
-                        print(f"{Fore.RED}❌ Неверный номер строки!{Style.RESET_ALL}")
-                        await asyncio.sleep(1)
-            except ValueError:
-                pass
-
-            input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка отображения трендов: {e}")
-            print(f"{Fore.RED}❌ Ошибка: {e}{Style.RESET_ALL}")
-            import traceback
-            traceback.print_exc()
-            input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-
-    async def display_trend_details(self, trend_id: int):
-        """Отображение детальной информации о тренде с пояснениями"""
-        try:
-            async with aiosqlite.connect(self.db_path) as conn:
-                conn.row_factory = aiosqlite.Row
-                cursor = await conn.execute("SELECT * FROM trend_analysis WHERE id = ?", (trend_id,))
-                row = await cursor.fetchone()
-                trend = dict(row) if row else None
-
-            if not trend:
-                print(f"{Fore.RED}❌ Тренд #{trend_id} не найден{Style.RESET_ALL}")
-                input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-                return
-
-            self.clear_screen()
-            symbol = trend.get('symbol', '')
-            direction = trend.get('trend_direction', '')
-
-            self.print_header(f"📊 ТРЕНД (D1) — {symbol} (ID: {trend_id})")
-
-            if direction == 'BULL':
-                dir_display = f"{Fore.GREEN}BULL (бычий){Style.RESET_ALL}"
-                dir_comment = "восходящий"
-                trade_hint = "Торгуем только LONG"
-            elif direction == 'BEAR':
-                dir_display = f"{Fore.RED}BEAR (медвежий){Style.RESET_ALL}"
-                dir_comment = "нисходящий"
-                trade_hint = "Торгуем только SHORT"
-            else:
-                dir_display = f"{Fore.YELLOW}SIDEWAYS (боковик){Style.RESET_ALL}"
-                dir_comment = "без тренда"
-                trade_hint = "Лучше воздержаться от торговли"
-
-            print(f"  Направление:   {dir_display}")
-
-            adx = trend.get('adx', 0)
-            if adx > 25:
-                adx_comment = ">25 = сильный тренд"
-                adx_color = Fore.GREEN
-            elif adx > 20:
-                adx_comment = "20-25 = умеренный тренд"
-                adx_color = Fore.YELLOW
-            else:
-                adx_comment = "<20 = слабый тренд или флэт"
-                adx_color = Fore.RED
-
-            print(f"  ADX:           {adx_color}{adx:.1f}{Style.RESET_ALL} ({adx_comment})")
-
-            ema20 = trend.get('ema20', 0)
-            ema50 = trend.get('ema50', 0)
-            print(f"  EMA20:         {self.format_price(ema20)}")
-            print(f"  EMA50:         {self.format_price(ema50)}")
-
-            if ema20 > ema50:
-                ema_comment = "EMA20 выше EMA50 → бычий сигнал"
-                ema_color = Fore.GREEN
-            elif ema20 < ema50:
-                ema_comment = "EMA20 ниже EMA50 → медвежий сигнал"
-                ema_color = Fore.RED
-            else:
-                ema_comment = "EMA20 и EMA50 близки → неопределённость"
-                ema_color = Fore.YELLOW
-            print(f"                  💡 {ema_color}{ema_comment}{Style.RESET_ALL}")
-
-            macd_line = trend.get('macd_line', 0)
-            macd_signal = trend.get('macd_signal', 0)
-
-            if macd_line > 0:
-                macd_line_display = f"{Fore.GREEN}{macd_line:.2f}{Style.RESET_ALL}"
-            elif macd_line < 0:
-                macd_line_display = f"{Fore.RED}{macd_line:.2f}{Style.RESET_ALL}"
-            else:
-                macd_line_display = f"{Fore.YELLOW}0.00{Style.RESET_ALL}"
-
-            if macd_signal > 0:
-                macd_signal_display = f"{Fore.GREEN}{macd_signal:.2f}{Style.RESET_ALL}"
-            elif macd_signal < 0:
-                macd_signal_display = f"{Fore.RED}{macd_signal:.2f}{Style.RESET_ALL}"
-            else:
-                macd_signal_display = f"{Fore.YELLOW}0.00{Style.RESET_ALL}"
-
-            print(f"  MACD линия:    {macd_line_display}")
-            print(f"  Сигнальная:    {macd_signal_display}")
-
-            if macd_line > macd_signal:
-                macd_comment = "MACD выше сигнальной → бычий сигнал"
-                macd_color = Fore.GREEN
-            elif macd_line < macd_signal:
-                macd_comment = "MACD ниже сигнальной → медвежий сигнал"
-                macd_color = Fore.RED
-            else:
-                macd_comment = "MACD на уровне сигнальной → ждём"
-                macd_color = Fore.YELLOW
-            print(f"                  💡 {macd_color}{macd_comment}{Style.RESET_ALL}")
-
-            confidence = trend.get('confidence', 0)
-            print(f"  Уверенность:   {self.format_confidence(confidence)}")
-
-            created = trend.get('created_time', '')
-            print(f"  Время анализа: {self.format_datetime(created)}")
-
-            print(f"\n{Fore.CYAN}{'─' * 60}{Style.RESET_ALL}")
-            print(f"  💡 Комментарий: Тренд {dir_comment}, ADX {adx:.1f}.")
-
-            if direction == 'BULL':
-                print(f"     EMA и MACD подтверждают рост.")
-            elif direction == 'BEAR':
-                print(f"     EMA и MACD подтверждают падение.")
-            else:
-                print(f"     Индикаторы не дают чёткого направления.")
-
-            print(f"     {trade_hint}.")
-
-            print(f"\n{Fore.CYAN}{'=' * 80}{Style.RESET_ALL}")
-            input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка отображения деталей тренда: {e}")
-            print(f"{Fore.RED}❌ Ошибка: {e}{Style.RESET_ALL}")
-            import traceback
-            traceback.print_exc()
-            input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
-
     async def main_menu(self):
         while True:
             self.clear_screen()
-            self.print_header("THREE SCREEN ANALYZER - МОНИТОР СИГНАЛОВ (v1.5.2)")
+            self.print_header("THREE SCREEN ANALYZER - МОНИТОР СИГНАЛОВ (v2.1)")
 
             trading_mode = self.config.get('trading_mode', 'pro')
             mode_color = Fore.GREEN if trading_mode == 'light' else Fore.CYAN
@@ -1484,7 +1061,7 @@ class ThreeScreenMonitor:
             account_state = await self.get_account_state()
 
             print(f"{Fore.YELLOW}💰 СОСТОЯНИЕ СЧЁТА:{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}────────────────────────────────────────────────{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}{'─' * 90}{Style.RESET_ALL}")
             print(f"  Депозит (начальный):    {Fore.WHITE}{account_state['initial_balance']:.2f} USDT{Style.RESET_ALL}")
             print(f"  Текущий баланс:         {Fore.WHITE}{account_state['current_balance']:.2f} USDT{Style.RESET_ALL}")
             print(f"  Использовано маржи:     {Fore.YELLOW}{account_state['used_margin']:.2f} USDT{Style.RESET_ALL}")
@@ -1541,27 +1118,62 @@ class ThreeScreenMonitor:
                 print(f"\n{Fore.YELLOW}🛑 Выход...{Style.RESET_ALL}")
                 break
 
+    async def display_database_stats(self):
+        """Отображение статистики базы данных"""
+        if not self.signal_repo:
+            print(f"{Fore.RED}❌ SignalRepository не инициализирован{Style.RESET_ALL}")
+            input(f"\n{Fore.GREEN}Нажмите Enter для возврата...{Style.RESET_ALL}")
+            return
+
+        stats = await self.signal_repo.get_database_stats()
+        self.clear_screen()
+        self.print_header("СТАТИСТИКА БАЗЫ ДАННЫХ")
+
+        print(f"{Fore.YELLOW}📊 СТАТИСТИКА СИГНАЛОВ:{Style.RESET_ALL}")
+        print(f"  Всего сигналов:      {stats.get('total_signals', 0)}")
+        print(f"  WATCH:               {stats.get('subtypes_stats', {}).get('WATCH', 0)}")
+        print(f"  M15:                 {stats.get('subtypes_stats', {}).get('M15', 0)}")
+        print(f"  Активных:            {stats.get('active_signals', 0)}")
+        print(f"  BUY:                 {stats.get('buy_signals', 0)}")
+        print(f"  SELL:                {stats.get('sell_signals', 0)}")
+
+        print(f"\n{Fore.YELLOW}🎯 ТИПЫ ВХОДОВ (SMC):{Style.RESET_ALL}")
+        print(f"  SNIPER:              {stats.get('entry_type_stats', {}).get('SNIPER', 0)}")
+        print(f"  TREND:               {stats.get('entry_type_stats', {}).get('TREND', 0)}")
+        print(f"  LEGACY:              {stats.get('entry_type_stats', {}).get('LEGACY', 0)}")
+
+        print(f"\n{Fore.YELLOW}📈 СТАТИСТИКА СДЕЛОК:{Style.RESET_ALL}")
+        print(f"  Закрытых сделок:      {stats.get('closed_trades', 0)}")
+        print(f"  Общий PnL:            {self.format_pnl(stats.get('total_pnl', 0))}")
+        print(f"  Win Rate:             {stats.get('win_rate', 0):.1f}%")
+
+        print(f"\n{Fore.YELLOW}📊 СТАТИСТИКА ТРЕНДОВ:{Style.RESET_ALL}")
+        print(f"  Всего анализов:       {stats.get('total_trends', 0)}")
+
+        print(f"\n{Fore.CYAN}{'=' * 80}{Style.RESET_ALL}")
+        input(f"\n{Fore.GREEN}Нажмите Enter для продолжения...{Style.RESET_ALL}")
+
     async def run(self):
         try:
             if not self.signal_repo:
-                print(f"{Fore.RED}❌ SignalRepository не найден{Style.RESET_ALL}")
+                print(f"{Fore.RED}SignalRepository not found{Style.RESET_ALL}")
                 return
 
             if not await self.signal_repo.initialize():
-                print(f"{Fore.RED}❌ Не удалось инициализировать БД{Style.RESET_ALL}")
+                print(f"{Fore.RED}Failed to initialize database{Style.RESET_ALL}")
                 return
 
             if self.trade_repo:
                 await self.trade_repo.initialize()
 
-            print(f"{Fore.GREEN}✅ База данных подключена: {self.db_path}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}Database connected: {self.db_path}{Style.RESET_ALL}")
             await self.main_menu()
         except KeyboardInterrupt:
-            print(f"\n{Fore.YELLOW}🛑 Монитор остановлен{Style.RESET_ALL}")
+            print(f"\n{Fore.YELLOW}Monitor stopped{Style.RESET_ALL}")
 
 
 async def main():
-    print(f"{Fore.GREEN}🚀 Запуск Three Screen Analyzer Monitor (v1.5.2)...{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Starting Three Screen Analyzer Monitor (v2.1 FINAL)...{Style.RESET_ALL}")
     monitor = ThreeScreenMonitor()
     await monitor.run()
 
@@ -1570,4 +1182,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}👋 Программа завершена{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}Program terminated{Style.RESET_ALL}")

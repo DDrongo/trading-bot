@@ -1,18 +1,24 @@
-# analyzer/core/screen3_signal_generator.py (ПОЛНОСТЬЮ - ФАЗА 1.4.1)
+# analyzer/core/screen3_signal_generator.py (ПОЛНОСТЬЮ - ФАЗА 2.0 SMC)
 """
-🎯 ЭКРАН 3 - ГЕНЕРАЦИЯ СИГНАЛОВ M15 (только M15, рыночный ордер)
+🎯 ЭКРАН 3 - ГЕНЕРАЦИЯ СИГНАЛОВ M15 (Sniper/Trend Entry)
 
 ФАЗА 1.4.1:
 - ИСПРАВЛЕНО: убрана перезапись entry_price
 - ИСПРАВЛЕНО: entry_price берётся из best_zone, а не из closes[-1]
 - ИСПРАВЛЕНО: унифицирован формат цен (4 знака для CRVUSDT)
 - ИСПРАВЛЕНО: проверка SL < Entry для BUY, SL > Entry для SELL
-- ДОБАВЛЕНО: логирование реальной цены
+
+ФАЗА 2.0 - SMC (Smart Money Concepts):
+- 🆕 Sniper Entry: цена проколола пул ликвидности и вернулась в FVG
+- 🆕 Trend Entry: цена просто находится в FVG (без снятия ликвидности)
+- 🆕 Разный размер позиции: Sniper = 100%, Trend = 50% (передаётся в PositionManager)
+- 🆕 Проверка Liquidity Grab перед Sniper входом
+- 🆕 Возвращает entry_type для Position Manager
 """
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from enum import Enum
 import numpy as np
@@ -50,7 +56,14 @@ class Screen3Result:
     indicators: Dict[str, Any] = field(default_factory=dict)
     rejection_reason: str = ""
     order_type: str = "MARKET"
-    current_price_at_signal: float = 0.0  # ФАЗА 1.4.1: реальная цена
+    current_price_at_signal: float = 0.0
+
+    # ФАЗА 2.0: Новые поля для SMC
+    entry_type: str = "LEGACY"  # 'SNIPER', 'TREND', 'LEGACY'
+    position_multiplier: float = 1.0  # Sniper=1.0, Trend=0.5, Legacy=0.75
+    liquidity_grabbed: bool = False  # Было ли снятие ликвидности
+    fvg_present: bool = False  # Был ли FVG
+    grab_price: Optional[float] = None  # Цена прокола ликвидности
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -66,14 +79,19 @@ class Screen3Result:
             "passed": self.passed,
             "indicators": self.indicators,
             "order_type": self.order_type,
-            "current_price_at_signal": self.current_price_at_signal
+            "current_price_at_signal": self.current_price_at_signal,
+            "entry_type": self.entry_type,
+            "position_multiplier": self.position_multiplier,
+            "liquidity_grabbed": self.liquidity_grabbed,
+            "fvg_present": self.fvg_present,
+            "grab_price": self.grab_price
         }
 
 
 class Screen3SignalGenerator:
     """
     Анализатор для третьего экрана - генерация сигналов M15
-    ФАЗА 1.4.1: Исправлены источники цены, унифицирован формат
+    ФАЗА 2.0: Sniper/Trend Entry логика
     """
 
     def __init__(self, config=None):
@@ -149,13 +167,25 @@ class Screen3SignalGenerator:
 
         self.m15_config = m15_config
 
-        logger.info(f"✅ Screen3SignalGenerator настроен для M15 (Фаза 1.4.1)")
+        # ФАЗА 2.0: Настройки SMC
+        smc_config = analysis_config.get('smc', {})
+        self.sniper_liquidity_grab_lookback = smc_config.get('sniper_liquidity_grab_lookback',
+                                                             5)  # свечей для проверки прокола
+        self.sniper_min_distance_to_fvg_pct = smc_config.get('sniper_min_distance_to_fvg_pct',
+                                                             0.1)  # мин. расстояние до FVG
+        self.trend_max_distance_to_fvg_pct = smc_config.get('trend_max_distance_to_fvg_pct',
+                                                            2.0)  # макс. расстояние до FVG для Trend
+
+        logger.info(f"✅ Screen3SignalGenerator настроен для M15 (Фаза 2.0 SMC)")
         logger.info(f"   Min R/R: {self.min_rr_ratio}:1, {self.expiration_hours}ч, ордер: {self.order_type}")
-        logger.info(f"   Проверка SL: BUY → SL < Entry, SELL → SL > Entry")
-        logger.info(f"   Entry = best_zone (из Screen2)")
+        logger.info(f"   Sniper: прокол + возврат в FVG")
+        logger.info(f"   Trend: вход в FVG без прокола")
+        logger.info(f"   Entry = реальная цена (из DataProvider)")
 
     def _format_price(self, price: float) -> str:
         """Унифицированное форматирование цены"""
+        if price is None or price == 0:
+            return "-"
         if price < 0.01:
             return f"{price:.6f}"
         elif price < 0.1:
@@ -171,6 +201,8 @@ class Screen3SignalGenerator:
 
     def _round_price(self, price: float, symbol: str = "") -> float:
         """Округление цены с учётом tick_size"""
+        if price is None or price == 0:
+            return 0.0
         try:
             if price < 0.001:
                 return round(price, 6)
@@ -187,17 +219,21 @@ class Screen3SignalGenerator:
         except:
             return round(price, 2)
 
-    def generate_signal(self, symbol: str, m15_klines: List, m5_klines: List,
-                        screen1_result: Any, screen2_result: Any,
-                        real_current_price: float = None) -> Screen3Result:
+    def generate_signal(
+            self,
+            symbol: str,
+            m15_klines: List,
+            m5_klines: List,
+            screen1_result: Any,
+            screen2_result: Any,
+            real_current_price: float = None,
+            liquidity_scanner: Any = None,
+            fvg_detector: Any = None
+    ) -> Screen3Result:
         """
-        Основной метод генерации M15 сигнала
-
-        ФАЗА 1.5.2 — ИСПРАВЛЕНИЕ: ЗОНА ИМЕЕТ ПРИОРИТЕТ!
-        - Если цена В ЗОНЕ или БЛИЗКО (≤2%) → входим по рынку
-        - Если цена ДАЛЕКО от зоны → ОТКАЗ
+        Основной метод генерации M15 сигнала с SMC логикой
         """
-        logger.info(f"⚡ {symbol} - Генерация M15 сигнала")
+        logger.info(f"⚡ {symbol} - Генерация M15 сигнала (SMC)")
         result = Screen3Result()
         result.signal_subtype = "M15"
         result.order_type = "MARKET"
@@ -209,8 +245,19 @@ class Screen3SignalGenerator:
                 result.rejection_reason = reason
                 return result
 
-            logger.info(f"Анализ M15 данных: {len(m15_klines)} свечей")
+            # ========== ФАЗА 2.0: ПОЛУЧАЕМ SMC ДАННЫЕ ИЗ SCREEN2 ==========
+            entry_type = getattr(screen2_result, 'entry_type', 'LEGACY')
+            fvg_zones = getattr(screen2_result, 'fvg_zones', [])
+            liquidity_pools = getattr(screen2_result, 'liquidity_pools', [])
+            selected_fvg = getattr(screen2_result, 'selected_fvg', None)
+            selected_liquidity_pool = getattr(screen2_result, 'selected_liquidity_pool', None)
 
+            result.entry_type = entry_type
+            result.fvg_present = bool(selected_fvg or fvg_zones)
+
+            logger.info(f"📊 {symbol}: entry_type={entry_type}, fvg_present={result.fvg_present}")
+
+            # ========== ПОИСК ПАТТЕРНОВ ==========
             patterns = self._find_chart_patterns_m15(m15_klines, screen1_result.trend_direction)
             rsi_divergence = self._analyze_rsi_divergence_m15(m15_klines, screen1_result.trend_direction)
 
@@ -218,10 +265,7 @@ class Screen3SignalGenerator:
             lows = [float(k[3]) for k in m15_klines]
             closes = [float(k[4]) for k in m15_klines]
 
-            stochastic_data = self._calculate_stochastic(highs, lows, closes,
-                                                         self.stochastic_periods['k'],
-                                                         self.stochastic_periods['d'],
-                                                         self.stochastic_periods['slowing'])
+            stochastic_data = self._calculate_stochastic(highs, lows, closes)
 
             has_trigger = bool(patterns or rsi_divergence)
 
@@ -256,74 +300,132 @@ class Screen3SignalGenerator:
 
             signal_type = "BUY" if screen1_result.trend_direction == "BULL" else "SELL"
 
-            # ========== ФАЗА 1.5.2: ИСПРАВЛЕНИЕ — ЗОНА ИМЕЕТ ПРИОРИТЕТ! ==========
+            # ========== ОПРЕДЕЛЯЕМ ЦЕНУ ВХОДА И ПРОВЕРЯЕМ УСЛОВИЯ ==========
             zone_low = getattr(screen2_result, 'zone_low', 0)
             zone_high = getattr(screen2_result, 'zone_high', 0)
-            best_zone = getattr(screen2_result, 'best_zone', 0)
 
-            # Максимальное допустимое расстояние до зоны (2%)
-            MAX_DISTANCE_TO_ZONE_PCT = 2.0
+            entry_price = 0
+            liquidity_grabbed = False
+            grab_price = None
 
-            if zone_low > 0 and zone_high > 0 and real_current_price and real_current_price > 0:
-                if zone_low <= real_current_price <= zone_high:
-                    # ✅ Цена В ЗОНЕ — идеальный вход!
-                    entry_price = real_current_price
-                    logger.info(
-                        f"✅ {symbol}: цена {self._format_price(real_current_price)} В ЗОНЕ {self._format_price(zone_low)}-{self._format_price(zone_high)}")
+            if entry_type == 'SNIPER' and selected_fvg and selected_liquidity_pool:
+                pool_price = selected_liquidity_pool.get('price', 0)
+                fvg_low = selected_fvg.get('low', 0)
+                fvg_high = selected_fvg.get('high', 0)
+
+                print(f"\n{'─' * 60}")
+                print(f"🔍 [SNIPER DIAG] {symbol}")
+                print(f"   Текущая цена: {real_current_price:.6f}")
+                print(f"   FVG зона: [{fvg_low:.6f} - {fvg_high:.6f}]")
+                print(f"   Liquidity Pool: {pool_price:.6f} ({selected_liquidity_pool.get('touches', '?')} касаний)")
+                print(f"   Тип пула: {selected_liquidity_pool.get('type', 'UNKNOWN')}")
+
+                if real_current_price < pool_price:
+                    print(f"   📍 Цена НИЖЕ пула ликвидности")
+                elif real_current_price > pool_price:
+                    print(f"   📍 Цена ВЫШЕ пула ликвидности")
                 else:
-                    # Цена вне зоны — проверяем расстояние
-                    zone_center = (zone_low + zone_high) / 2
-                    distance_to_zone = abs(real_current_price - zone_center) / zone_center * 100
+                    print(f"   📍 Цена НА УРОВНЕ пула")
 
-                    if distance_to_zone <= MAX_DISTANCE_TO_ZONE_PCT:
-                        # ⚠️ Цена близко к зоне — разрешаем вход
-                        entry_price = real_current_price
-                        logger.info(
-                            f"⚠️ {symbol}: цена {self._format_price(real_current_price)} близко к зоне ({distance_to_zone:.1f}% ≤ {MAX_DISTANCE_TO_ZONE_PCT}%)")
-                    else:
-                        # ❌ Цена далеко от зоны — ОТКАЗ!
-                        result.rejection_reason = f"Цена {self._format_price(real_current_price)} далеко от зоны {self._format_price(zone_low)}-{self._format_price(zone_high)} ({distance_to_zone:.1f}% > {MAX_DISTANCE_TO_ZONE_PCT}%)"
-                        logger.warning(f"❌ {symbol}: {result.rejection_reason}")
-                        return result
-            elif real_current_price is not None and real_current_price > 0:
-                # Нет зоны — используем текущую цену
-                entry_price = real_current_price
-                logger.info(f"📊 {symbol}: нет зоны, используем реальную цену {self._format_price(entry_price)}")
-            elif best_zone and best_zone > 0:
-                entry_price = best_zone
-                logger.info(f"📊 {symbol}: используем best_zone {self._format_price(entry_price)}")
+                if fvg_low <= real_current_price <= fvg_high:
+                    print(f"   📍 Цена ВНУТРИ FVG зоны")
+                elif real_current_price < fvg_low:
+                    print(f"   📍 Цена НИЖЕ FVG зоны на {(fvg_low - real_current_price) / fvg_low * 100:.2f}%")
+                else:
+                    print(f"   📍 Цена ВЫШЕ FVG зоны на {(real_current_price - fvg_high) / fvg_high * 100:.2f}%")
+
+                print(f"\n   🔍 Проверяем прокол пула за последние {self.sniper_liquidity_grab_lookback} свечей...")
+
+                is_grabbed, grab = self._check_liquidity_grab(
+                    m15_klines, selected_liquidity_pool, real_current_price
+                )
+
+                if is_grabbed and grab:
+                    liquidity_grabbed = True
+                    grab_price = grab
+                    result.liquidity_grabbed = True
+                    result.grab_price = grab_price
+                    entry_price = real_current_price if real_current_price and real_current_price > 0 else closes[-1]
+
+                    print(f"   ✅✅✅ SNIPER УСЛОВИЯ ВЫПОЛНЕНЫ!")
+                    print(f"   Прокол пула: {grab:.6f}")
+                    print(f"   Возврат в FVG: {entry_price:.6f}")
+                    result.position_multiplier = 1.0
+                else:
+                    print(f"   ⏳ SNIPER: ждём прокол пула ликвидности (ниже {pool_price:.6f})")
+                    result.rejection_reason = "Sniper: нет прокола ликвидности"
+                    print(f"{'─' * 60}\n")
+                    return result
+                print(f"{'─' * 60}\n")
+
+            elif entry_type == 'TREND' and selected_fvg:
+                print(f"\n{'─' * 60}")
+                print(f"🔍 [TREND DIAG] {symbol}")
+                print(f"   Текущая цена: {real_current_price:.6f}")
+                print(f"   FVG зона: [{selected_fvg.get('low', 0):.6f} - {selected_fvg.get('high', 0):.6f}]")
+
+                is_in_fvg = self._is_price_in_fvg(real_current_price, selected_fvg, self.trend_max_distance_to_fvg_pct)
+
+                if is_in_fvg:
+                    entry_price = real_current_price if real_current_price and real_current_price > 0 else closes[-1]
+                    print(f"   ✅ Цена в FVG зоне (допуск {self.trend_max_distance_to_fvg_pct}%)")
+                    result.position_multiplier = 0.75
+                else:
+                    print(f"   ❌ Цена НЕ в FVG зоне")
+                    result.rejection_reason = f"Trend: цена {real_current_price:.6f} не в FVG"
+                    print(f"{'─' * 60}\n")
+                    return result
+                print(f"{'─' * 60}\n")
+
             else:
-                entry_price = closes[-1] if closes else 0
-                logger.info(f"📊 {symbol}: fallback на M15 close {self._format_price(entry_price)}")
+                # Legacy Entry
+                if zone_low > 0 and zone_high > 0 and real_current_price and real_current_price > 0:
+                    if zone_low <= real_current_price <= zone_high:
+                        entry_price = real_current_price
+                    else:
+                        zone_center = (zone_low + zone_high) / 2
+                        distance_to_zone = abs(real_current_price - zone_center) / zone_center * 100
+                        if distance_to_zone <= 2.0:
+                            entry_price = real_current_price
+                        else:
+                            result.rejection_reason = f"Цена далеко от зоны ({distance_to_zone:.1f}%)"
+                            return result
+                elif real_current_price is not None and real_current_price > 0:
+                    entry_price = real_current_price
+                elif zone_low > 0:
+                    entry_price = (zone_low + zone_high) / 2
+                else:
+                    entry_price = closes[-1]
+
+                result.position_multiplier = 0.75
 
             if entry_price <= 0:
                 result.rejection_reason = "Некорректная цена входа"
                 return result
 
-            # Сохраняем реальную цену
             result.current_price_at_signal = entry_price
+            result.entry_price = entry_price
 
+            # ========== РАСЧЁТ SL И TP ==========
             atr = self._calculate_atr(highs, lows, closes, self.atr_period, entry_price)
 
             stop_loss = self._calculate_stop_loss(
                 entry_price=entry_price,
                 signal_type=signal_type,
-                atr=atr
+                atr=atr,
+                liquidity_grab_price=grab_price if entry_type == 'SNIPER' else None
             )
 
             if stop_loss is None:
                 result.rejection_reason = "Не удалось рассчитать Stop Loss"
                 return result
 
-            # Проверка SL относительно Entry
             if signal_type == "BUY" and stop_loss >= entry_price:
                 result.rejection_reason = f"SL ({self._format_price(stop_loss)}) >= Entry ({self._format_price(entry_price)}) для BUY"
-                logger.warning(f"❌ {symbol}: {result.rejection_reason}")
                 return result
 
             if signal_type == "SELL" and stop_loss <= entry_price:
                 result.rejection_reason = f"SL ({self._format_price(stop_loss)}) <= Entry ({self._format_price(entry_price)}) для SELL"
-                logger.warning(f"❌ {symbol}: {result.rejection_reason}")
                 return result
 
             risk = abs(entry_price - stop_loss)
@@ -336,20 +438,13 @@ class Screen3SignalGenerator:
 
             take_profit = self._round_price(take_profit)
 
-            # Проверка корректности SL и TP
             if signal_type == "BUY":
-                if stop_loss >= entry_price:
-                    result.rejection_reason = f"SL >= Entry для BUY"
-                    return result
-                if take_profit <= entry_price:
-                    result.rejection_reason = f"TP <= Entry для BUY"
+                if stop_loss >= entry_price or take_profit <= entry_price:
+                    result.rejection_reason = "Некорректные SL/TP для BUY"
                     return result
             else:
-                if stop_loss <= entry_price:
-                    result.rejection_reason = f"SL <= Entry для SELL"
-                    return result
-                if take_profit >= entry_price:
-                    result.rejection_reason = f"TP >= Entry для SELL"
+                if stop_loss <= entry_price or take_profit >= entry_price:
+                    result.rejection_reason = "Некорректные SL/TP для SELL"
                     return result
 
             min_sl_distance = entry_price * (self.min_sl_distance_absolute_pct / 100)
@@ -379,7 +474,10 @@ class Screen3SignalGenerator:
             if rr_ratio >= self.min_rr_ratio * 1.5:
                 base_confidence = min(base_confidence + self.pattern_confidence_bonus, self.max_confidence)
 
-            if base_confidence > self.strong_confidence_threshold:
+            if entry_type == 'SNIPER':
+                base_confidence = min(base_confidence + 0.1, self.max_confidence)
+                signal_strength = "STRONG"
+            elif base_confidence > self.strong_confidence_threshold:
                 signal_strength = "STRONG"
             elif base_confidence > self.moderate_confidence_threshold:
                 signal_strength = "MODERATE"
@@ -395,7 +493,6 @@ class Screen3SignalGenerator:
                 trigger_pattern = "STOCHASTIC_CROSS"
 
             result.signal_type = signal_type
-            result.entry_price = self._round_price(entry_price)
             result.stop_loss = self._round_price(stop_loss)
             result.take_profit = take_profit
             result.signal_strength = signal_strength
@@ -413,17 +510,97 @@ class Screen3SignalGenerator:
                 "pattern_count": len(patterns),
                 "atr": round(atr, 4),
                 "risk_reward_ratio": rr_ratio,
-                "risk_pct": abs(stop_loss - entry_price) / entry_price * 100
+                "risk_pct": abs(stop_loss - entry_price) / entry_price * 100,
+                "entry_type": entry_type,
+                "position_multiplier": result.position_multiplier,
+                "liquidity_grabbed": liquidity_grabbed
             }
 
-            logger.info(
-                f"✅ M15 сигнал сгенерирован: {signal_type} @ {self._format_price(entry_price)}, R/R={rr_ratio:.2f}:1")
+            print(f"✅ {symbol}: {entry_type} сигнал сгенерирован! {signal_type} @ {self._format_price(entry_price)}")
             return result
 
         except Exception as e:
             logger.error(f"❌ Ошибка генерации M15 сигнала для {symbol}: {str(e)}")
             result.rejection_reason = f"Ошибка: {str(e)}"
             return result
+
+    def _check_liquidity_grab(
+            self,
+            m15_klines: List,
+            liquidity_pool: Dict[str, Any],
+            current_price: float
+    ) -> Tuple[bool, Optional[float]]:
+        """
+        Проверяет, было ли снятие ликвидности (Liquidity Grab)
+
+        Liquidity Grab происходит когда:
+        1. Цена пробила уровень пула ликвидности
+        2. И вернулась обратно выше/ниже уровня
+        """
+        if not m15_klines or not liquidity_pool or current_price is None:
+            return False, None
+
+        pool_price = liquidity_pool.get('price', 0)
+        pool_type = liquidity_pool.get('type', '')
+
+        if pool_price <= 0:
+            return False, None
+
+        # Берём последние N свечей для проверки прокола
+        lookback = min(self.sniper_liquidity_grab_lookback, len(m15_klines))
+        recent_candles = m15_klines[-lookback:]
+
+        if pool_type == 'SELL_SIDE':
+            # Проверяем прокол НИЖЕ пула (стопы лонгистов)
+            for candle in recent_candles:
+                candle_low = float(candle[3])  # low
+                if candle_low < pool_price:
+                    # Был прокол, проверяем возврат
+                    if current_price > pool_price:
+                        logger.debug(
+                            f"💧 Liquidity Grab SELL_SIDE: прокол {candle_low:.6f} < {pool_price:.6f} → возврат {current_price:.6f}")
+                        return True, candle_low
+
+        elif pool_type == 'BUY_SIDE':
+            # Проверяем прокол ВЫШЕ пула (стопы шортистов)
+            for candle in recent_candles:
+                candle_high = float(candle[2])  # high
+                if candle_high > pool_price:
+                    # Был прокол, проверяем возврат
+                    if current_price < pool_price:
+                        logger.debug(
+                            f"💧 Liquidity Grab BUY_SIDE: прокол {candle_high:.6f} > {pool_price:.6f} → возврат {current_price:.6f}")
+                        return True, candle_high
+
+        return False, None
+
+    def _is_price_in_fvg(
+            self,
+            price: float,
+            fvg_zone: Dict[str, Any],
+            max_distance_pct: float = 2.0
+    ) -> bool:
+        """Проверяет, находится ли цена в FVG зоне (с допуском)"""
+        if not fvg_zone or price is None or price <= 0:
+            return False
+
+        zone_low = fvg_zone.get('low', 0)
+        zone_high = fvg_zone.get('high', 0)
+
+        if zone_low <= 0 or zone_high <= 0:
+            return False
+
+        # Проверяем, в зоне ли цена
+        if zone_low <= price <= zone_high:
+            return True
+
+        # Проверяем близость к зоне (допуск)
+        if price < zone_low:
+            distance_pct = (zone_low - price) / zone_low * 100
+            return distance_pct <= max_distance_pct
+        else:
+            distance_pct = (price - zone_high) / zone_high * 100
+            return distance_pct <= max_distance_pct
 
     def _validate_price_range(self, price: float, symbol: str, market_data: Dict = None) -> bool:
         try:
@@ -433,9 +610,18 @@ class Screen3SignalGenerator:
         except:
             return True
 
-    def _calculate_stop_loss(self, entry_price: float, signal_type: str, atr: float,
-                             resistance_level: Optional[float] = None,
-                             support_level: Optional[float] = None) -> Optional[float]:
+    def _calculate_stop_loss(
+            self,
+            entry_price: float,
+            signal_type: str,
+            atr: float,
+            resistance_level: Optional[float] = None,
+            support_level: Optional[float] = None,
+            liquidity_grab_price: Optional[float] = None
+    ) -> Optional[float]:
+        """
+        Расчёт Stop Loss с учётом Liquidity Grab для Sniper входов
+        """
         logger.info(
             f"🔍 РАСЧЕТ STOP LOSS для {signal_type} @ {self._format_price(entry_price)}, ATR={self._format_price(atr)}")
 
@@ -445,53 +631,65 @@ class Screen3SignalGenerator:
         if entry_price <= 0:
             return None
 
-        if signal_type == "SELL":
-            stop_by_atr = entry_price + (atr * 1.5)
+        # Для Sniper: SL за хвостом свечи, которая прокалывала ликвидность
+        if liquidity_grab_price is not None and liquidity_grab_price > 0:
+            if signal_type == "BUY":
+                # Прокол был вниз, SL ставим ниже хвоста
+                stop_loss = liquidity_grab_price - (atr * 0.5)
+                logger.info(f"🎯 Sniper BUY: SL за хвостом {liquidity_grab_price:.6f} -> {stop_loss:.6f}")
+            else:
+                # Прокол был вверх, SL ставим выше хвоста
+                stop_loss = liquidity_grab_price + (atr * 0.5)
+                logger.info(f"🎯 Sniper SELL: SL за хвостом {liquidity_grab_price:.6f} -> {stop_loss:.6f}")
         else:
-            stop_by_atr = entry_price - (atr * 1.5)
+            # Стандартный расчёт SL
+            if signal_type == "SELL":
+                stop_by_atr = entry_price + (atr * 1.5)
+            else:
+                stop_by_atr = entry_price - (atr * 1.5)
 
-        min_distance_pct = self.min_sl_distance_absolute_pct / 100
-        min_distance = entry_price * min_distance_pct
+            min_distance_pct = self.min_sl_distance_absolute_pct / 100
+            min_distance = entry_price * min_distance_pct
 
-        if entry_price < 0.01:
-            min_distance = max(min_distance, 0.0001)
+            if entry_price < 0.01:
+                min_distance = max(min_distance, 0.0001)
 
-        if signal_type == "SELL":
-            if stop_by_atr <= entry_price + min_distance:
-                stop_by_atr = entry_price + min_distance
-            if stop_by_atr <= entry_price:
-                stop_by_atr = entry_price * (1 + self.sl_safety_buffer_pct / 100)
-        else:
-            if stop_by_atr >= entry_price - min_distance:
-                stop_by_atr = entry_price - min_distance
-            if stop_by_atr >= entry_price:
-                stop_by_atr = entry_price * (1 - self.sl_safety_buffer_pct / 100)
+            if signal_type == "SELL":
+                if stop_by_atr <= entry_price + min_distance:
+                    stop_by_atr = entry_price + min_distance
+                if stop_by_atr <= entry_price:
+                    stop_by_atr = entry_price * (1 + self.sl_safety_buffer_pct / 100)
+            else:
+                if stop_by_atr >= entry_price - min_distance:
+                    stop_by_atr = entry_price - min_distance
+                if stop_by_atr >= entry_price:
+                    stop_by_atr = entry_price * (1 - self.sl_safety_buffer_pct / 100)
 
-        max_risk_distance = entry_price * self.max_risk_pct
+            max_risk_distance = entry_price * self.max_risk_pct
 
-        candidates = [stop_by_atr]
+            candidates = [stop_by_atr]
 
-        if signal_type == "SELL":
-            max_stop = entry_price + max_risk_distance
-            candidates.append(max_stop)
-            if resistance_level and resistance_level > entry_price:
-                candidates.append(resistance_level)
-            stop_loss = min(candidates)
-        else:
-            max_stop = entry_price - max_risk_distance
-            candidates.append(max_stop)
-            if support_level and support_level < entry_price:
-                candidates.append(support_level)
-            stop_loss = max(candidates)
+            if signal_type == "SELL":
+                max_stop = entry_price + max_risk_distance
+                candidates.append(max_stop)
+                if resistance_level and resistance_level > entry_price:
+                    candidates.append(resistance_level)
+                stop_loss = min(candidates)
+            else:
+                max_stop = entry_price - max_risk_distance
+                candidates.append(max_stop)
+                if support_level and support_level < entry_price:
+                    candidates.append(support_level)
+                stop_loss = max(candidates)
 
-        if signal_type == "SELL":
-            max_stop_allowed = entry_price * (1 + self.max_sl_distance_pct)
-            min_stop_required = entry_price * (1 + self.sl_safety_buffer_pct / 100)
-            stop_loss = max(min(stop_loss, max_stop_allowed), min_stop_required)
-        else:
-            min_stop_allowed = entry_price * (1 - self.max_sl_distance_pct)
-            max_stop_required = entry_price * (1 - self.sl_safety_buffer_pct / 100)
-            stop_loss = min(max(stop_loss, min_stop_allowed), max_stop_required)
+            if signal_type == "SELL":
+                max_stop_allowed = entry_price * (1 + self.max_sl_distance_pct)
+                min_stop_required = entry_price * (1 + self.sl_safety_buffer_pct / 100)
+                stop_loss = max(min(stop_loss, max_stop_allowed), min_stop_required)
+            else:
+                min_stop_allowed = entry_price * (1 - self.max_sl_distance_pct)
+                max_stop_required = entry_price * (1 - self.sl_safety_buffer_pct / 100)
+                stop_loss = min(max(stop_loss, min_stop_allowed), max_stop_required)
 
         if abs(stop_loss - entry_price) < entry_price * 0.0001:
             if signal_type == 'BUY':

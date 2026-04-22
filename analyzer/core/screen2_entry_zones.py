@@ -1,4 +1,4 @@
-# analyzer/core/screen2_entry_zones.py (ПОЛНОСТЬЮ - ФАЗА 1.5.2)
+# analyzer/core/screen2_entry_zones.py (ПОЛНОСТЬЮ - ФАЗА 2.0 SMC)
 """
 screen2_entry_zones.py - поиск зон входа (H4)
 
@@ -10,13 +10,14 @@ screen2_entry_zones.py - поиск зон входа (H4)
 - Учитываются только уровни, вызывавшие разворот (не проколы)
 
 ФАЗА 1.5.2:
-- 🆕 Добавлены start_time, end_time, candless_count в импульс и коррекцию
-- 🆕 Точные координаты для поиска на графике
+- Добавлены start_time, end_time, candles_count в импульс и коррекцию
+- Точные координаты для поиска на графике
 
-СОВМЕСТИМОСТЬ:
-- Полностью совместим с ThreeScreenAnalyzer (ожидает метод analyze)
-- Возвращает Screen2Result с полями zone_low, zone_high, screen2_score
-- Интегрируется без изменений в orchestrator.py
+ФАЗА 2.0 - SMC (Smart Money Concepts):
+- 🆕 Интеграция FVG Detector (Fair Value Gaps)
+- 🆕 Интеграция Liquidity Scanner (бассейны ликвидности)
+- 🆕 Приоритет зон: SNIPER (FVG + Liquidity) > TREND (FVG) > LEGACY (исторические уровни)
+- 🆕 Возвращает entry_type для Position Manager
 """
 
 import logging
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class Screen2Analyzer:
-    """Анализатор зон входа (Экран 2) с историческими уровнями"""
+    """Анализатор зон входа (Экран 2) с историческими уровнями и SMC"""
 
     # ========== КОНФИГУРАЦИЯ ИСТОРИЧЕСКИХ УРОВНЕЙ ==========
     HISTORICAL_CONFIG = {
@@ -77,14 +78,19 @@ class Screen2Analyzer:
         self.db_path = self._get_db_path()
         self._init_db()
 
-        logger.info(f"✅ Screen2Analyzer инициализирован (Фаза 1.5.2)")
+        # ========== ФАЗА 2.0: SMC КОМПОНЕНТЫ ==========
+        self._fvg_detector = None
+        self._liquidity_scanner = None
+
+        logger.info(f"✅ Screen2Analyzer инициализирован (Фаза 2.0 SMC)")
         logger.info(f"   Исторические уровни: ВКЛЮЧЕНЫ")
         logger.info(
             f"   W1: {self.HISTORICAL_CONFIG['W1']['years_back']} лет, мин. {self.HISTORICAL_CONFIG['W1']['min_touches']} касаний")
         logger.info(
             f"   D1: {self.HISTORICAL_CONFIG['D1']['years_back']} год, мин. {self.HISTORICAL_CONFIG['D1']['min_touches']} касания")
         logger.info(f"   БД: {self.db_path}")
-        logger.info(f"   🆕 H4 анализ с датами: ВКЛЮЧЕН")
+        logger.info(f"   🆕 SMC: FVG Detector + Liquidity Scanner")
+        logger.info(f"   🆕 Приоритет: SNIPER > TREND > LEGACY")
 
     def _get_db_path(self) -> str:
         """Получение пути к БД исторических уровней (ОТДЕЛЬНАЯ БД)"""
@@ -118,6 +124,30 @@ class Screen2Analyzer:
             conn.close()
         except Exception as e:
             logger.warning(f"⚠️ Не удалось проверить БД: {e}")
+
+    def _get_fvg_detector(self):
+        """Ленивая инициализация FVG детектора"""
+        if self._fvg_detector is None:
+            try:
+                from analyzer.core.analyst.fvg_detector import FVGDetector
+                self._fvg_detector = FVGDetector()
+                logger.debug("✅ FVGDetector инициализирован")
+            except ImportError as e:
+                logger.warning(f"⚠️ Не удалось импортировать FVGDetector: {e}")
+                self._fvg_detector = None
+        return self._fvg_detector
+
+    def _get_liquidity_scanner(self):
+        """Ленивая инициализация Liquidity Scanner"""
+        if self._liquidity_scanner is None:
+            try:
+                from analyzer.core.analyst.liquidity_scanner import LiquidityScanner
+                self._liquidity_scanner = LiquidityScanner()
+                logger.debug("✅ LiquidityScanner инициализирован")
+            except ImportError as e:
+                logger.warning(f"⚠️ Не удалось импортировать LiquidityScanner: {e}")
+                self._liquidity_scanner = None
+        return self._liquidity_scanner
 
     def _load_historical_levels(self, symbol: str) -> Tuple[List[Dict], List[Dict]]:
         """
@@ -194,6 +224,7 @@ class Screen2Analyzer:
 
         ФАЗА 1.5.1: Интеграция исторических уровней
         ФАЗА 1.5.2: Добавлены даты в импульс/коррекцию
+        ФАЗА 2.0: SMC приоритет (SNIPER > TREND > LEGACY)
         """
         if not h4_data or len(h4_data) < 20:
             return {
@@ -209,6 +240,13 @@ class Screen2Analyzer:
                     'score': 0,
                     'reason': f'Невалидный символ: {symbol}'
                 }
+
+            # ========== ФАЗА 2.0: СНАЧАЛА ПРОВЕРЯЕМ SMC ЗОНЫ ==========
+            smc_result = self._analyze_smc_zones(h4_data, trend_direction, current_price, symbol)
+
+            if smc_result.get('success'):
+                logger.info(f"✅ {symbol}: SMC зона найдена — {smc_result.get('entry_type')}")
+                return smc_result
 
             # ========== ФАЗА 1.5.1: ЗАГРУЖАЕМ ИСТОРИЧЕСКИЕ УРОВНИ ==========
             hist_supports, hist_resistances = self._load_historical_levels(symbol)
@@ -298,9 +336,8 @@ class Screen2Analyzer:
                 zone_source = best_zone.get('source', 'H4')
                 zone_strength = best_zone.get('strength', 'WEAK')
 
-                logger.info(f"✅ {symbol}: ЭКРАН 2 пройден (score={score}/8)")
-                logger.info(
-                    f"   Зона: {best_zone.get('low', best_zone.get('price', 0)):.4f}-{best_zone.get('high', best_zone.get('price', 0)):.4f}")
+                logger.info(f"✅ {symbol}: ЭКРАН 2 пройден (score={score}/8) [LEGACY]")
+                logger.info(f"   Зона: {best_zone.get('low', best_zone.get('price', 0)):.4f}-{best_zone.get('high', best_zone.get('price', 0)):.4f}")
                 logger.info(f"   Источник: {zone_source}, сила: {zone_strength}")
 
                 return {
@@ -310,6 +347,7 @@ class Screen2Analyzer:
                     'zone_high': best_zone.get('high', best_zone.get('price', 0)),
                     'expected_pattern': expected_pattern,
                     'reason': f'Score {score}/8',
+                    'entry_type': 'LEGACY',
                     'h4_analysis': h4_analysis,
                     'support_levels': all_supports,
                     'resistance_levels': all_resistances,
@@ -333,6 +371,217 @@ class Screen2Analyzer:
                 'score': 0,
                 'reason': str(e)
             }
+
+    # ========== ФАЗА 2.0: SMC МЕТОДЫ ==========
+
+    def _analyze_smc_zones(self, h4_data, trend_direction, current_price, symbol):
+        fvg_detector = self._get_fvg_detector()
+        liquidity_scanner = self._get_liquidity_scanner()
+
+        if fvg_detector is None:
+            return {'success': False, 'reason': 'FVGDetector не доступен'}
+
+        converted_klines = self._convert_to_klines_dict(h4_data)
+        fvg_zones = fvg_detector.find_fvg(converted_klines)
+
+        if not fvg_zones:
+            return {'success': False, 'reason': 'FVG зоны не найдены'}
+
+        logger.debug(f"🕳️ {symbol}: найдено {len(fvg_zones)} FVG зон")
+
+        if liquidity_scanner is not None:
+            liquidity_pools = liquidity_scanner.find_liquidity_pools(converted_klines)
+
+            if liquidity_pools:
+                logger.debug(f"💧 {symbol}: найдено {len(liquidity_pools)} пулов ликвидности")
+                sniper_zone = self._find_sniper_zone(fvg_zones, liquidity_pools, trend_direction, current_price)
+
+                if sniper_zone:
+                    selected_fvg = sniper_zone.get('fvg_zone', {})
+                    logger.info(f"🎯 {symbol}: SNIPER зона найдена!")
+                    logger.info(f"   FVG: {selected_fvg.get('low', 0):.4f}-{selected_fvg.get('high', 0):.4f}")
+                    logger.info(f"   Liquidity Pool: {sniper_zone.get('liquidity_pool', {}).get('price', 0):.4f}")
+
+                    return {
+                        'success': True,
+                        'score': 8,
+                        'zone_low': sniper_zone['low'],
+                        'zone_high': sniper_zone['high'],
+                        'expected_pattern': 'PIN_BAR',
+                        'reason': 'Sniper entry: FVG above/below liquidity pool',
+                        'entry_type': 'SNIPER',
+                        'fvg_zones': fvg_zones,
+                        'liquidity_pools': liquidity_pools,
+                        'selected_fvg': {
+                            'low': selected_fvg.get('low', 0),
+                            'high': selected_fvg.get('high', 0),
+                            'type': selected_fvg.get('type', 'bullish'),
+                            'age': selected_fvg.get('age', 0),
+                            'strength': selected_fvg.get('strength', 'NORMAL'),
+                            'formed_at': selected_fvg.get('formed_at_dt', None)
+                        },
+                        'selected_liquidity_pool': sniper_zone.get('liquidity_pool')
+                    }
+
+        trend_zone = self._find_nearest_fvg_zone(fvg_zones, trend_direction, current_price)
+
+        if trend_zone:
+            logger.info(f"📈 {symbol}: TREND зона найдена (ближайший FVG)")
+            return {
+                'success': True,
+                'score': 6,
+                'zone_low': trend_zone['low'],
+                'zone_high': trend_zone['high'],
+                'expected_pattern': 'ENGULFING',
+                'reason': 'Trend entry: nearest FVG',
+                'entry_type': 'TREND',
+                'fvg_zones': fvg_zones,
+                'selected_fvg': trend_zone
+            }
+
+        return {'success': False, 'reason': 'SMC зоны не найдены'}
+
+    def _convert_to_klines_dict(self, h4_data: List[dict]) -> List[Dict[str, Any]]:
+        """Конвертирует H4 данные в формат для детекторов"""
+        converted = []
+        for k in h4_data:
+            converted.append({
+                'open': k['open'],
+                'high': k['high'],
+                'low': k['low'],
+                'close': k['close'],
+                'timestamp': k.get('timestamp', 0)
+            })
+        return converted
+
+    def _find_sniper_zone(
+            self,
+            fvg_zones: List[Dict],
+            liquidity_pools: List[Dict],
+            trend_direction: str,
+            current_price: float
+    ) -> Optional[Dict]:
+        """Находит идеальную зону для Sniper входа с диагностикой"""
+
+        logger.info(f"🔍 [SNIPER DIAG] Начинаем поиск для {trend_direction}")
+        logger.info(f"   FVG зон найдено: {len(fvg_zones)}")
+        logger.info(f"   Пуллов ликвидности найдено: {len(liquidity_pools)}")
+
+        if not fvg_zones:
+            logger.info(f"❌ [SNIPER DIAG] Нет FVG зон → SNIPER невозможен")
+            return None
+
+        if not liquidity_pools:
+            logger.info(f"❌ [SNIPER DIAG] Нет пулов ликвидности → SNIPER невозможен")
+            return None
+
+        if trend_direction == 'BULL':
+            sell_pools = [p for p in liquidity_pools if p['type'] == 'SELL_SIDE']
+            logger.info(f"   SELL_SIDE пулов (под ценой): {len(sell_pools)}")
+
+            for pool in sell_pools:
+                pool_price = pool['price']
+                logger.info(f"   Проверяем пул {pool_price:.4f} (касаний: {pool['touches']})")
+
+                for fvg in fvg_zones:
+                    if fvg['type'] == 'bullish' and fvg['low'] > pool_price:
+                        distance_pct = (fvg['low'] - pool_price) / pool_price * 100
+                        logger.info(f"      ✅ Найден bullish FVG {fvg['low']:.4f}-{fvg['high']:.4f} выше пула")
+                        logger.info(f"      Расстояние: {distance_pct:.2f}%")
+                        if distance_pct <= 5.0:
+                            logger.info(f"      ✅ SNIPER УСЛОВИЯ ВЫПОЛНЕНЫ!")
+                            return {
+                                'low': fvg['low'],
+                                'high': fvg['high'],
+                                'entry_type': 'SNIPER',
+                                'liquidity_pool': pool,
+                                'fvg_zone': fvg,
+                                'distance_pct': distance_pct
+                            }
+                        else:
+                            logger.info(f"      ❌ Слишком далеко: {distance_pct:.2f}% > 5%")
+                    else:
+                        logger.info(f"      FVG {fvg['type']} не подходит (нужен bullish)")
+        else:
+            # BEAR логика аналогично
+            buy_pools = [p for p in liquidity_pools if p['type'] == 'BUY_SIDE']
+            logger.info(f"   BUY_SIDE пулов (над ценой): {len(buy_pools)}")
+
+            for pool in buy_pools:
+                pool_price = pool['price']
+                logger.info(f"   Проверяем пул {pool_price:.4f} (касаний: {pool['touches']})")
+
+                for fvg in fvg_zones:
+                    if fvg['type'] == 'bearish' and fvg['high'] < pool_price:
+                        distance_pct = (pool_price - fvg['high']) / pool_price * 100
+                        logger.info(f"      ✅ Найден bearish FVG {fvg['low']:.4f}-{fvg['high']:.4f} ниже пула")
+                        logger.info(f"      Расстояние: {distance_pct:.2f}%")
+                        if distance_pct <= 5.0:
+                            logger.info(f"      ✅ SNIPER УСЛОВИЯ ВЫПОЛНЕНЫ!")
+                            return {
+                                'low': fvg['low'],
+                                'high': fvg['high'],
+                                'entry_type': 'SNIPER',
+                                'liquidity_pool': pool,
+                                'fvg_zone': fvg,
+                                'distance_pct': distance_pct
+                            }
+                        else:
+                            logger.info(f"      ❌ Слишком далеко: {distance_pct:.2f}% > 5%")
+
+        logger.info(f"❌ [SNIPER DIAG] Подходящая пара FVG + Liquidity Pool не найдена")
+        return None
+
+    def _find_nearest_fvg_zone(
+            self,
+            fvg_zones: List[Dict],
+            trend_direction: str,
+            current_price: float
+    ) -> Optional[Dict]:
+        """Находит ближайшую FVG зону к текущей цене"""
+        if trend_direction == 'BULL':
+            bullish_zones = [z for z in fvg_zones if z['type'] == 'bullish']
+
+            if not bullish_zones:
+                return None
+
+            # Ищем зону ниже цены (поддержка)
+            below = [z for z in bullish_zones if z['high'] < current_price]
+            if below:
+                nearest = max(below, key=lambda x: x['high'])
+                distance_pct = (current_price - nearest['high']) / current_price * 100
+                logger.debug(f"📈 Ближайший bullish FVG ниже: {nearest['low']:.4f}-{nearest['high']:.4f} (расст: {distance_pct:.2f}%)")
+                return nearest
+
+            # Если нет ниже, берём самую близкую сверху
+            nearest = min(bullish_zones, key=lambda x: x['low'])
+            distance_pct = (nearest['low'] - current_price) / current_price * 100
+            logger.debug(f"📈 Ближайший bullish FVG выше: {nearest['low']:.4f}-{nearest['high']:.4f} (расст: {distance_pct:.2f}%)")
+            return nearest
+
+        elif trend_direction == 'BEAR':
+            bearish_zones = [z for z in fvg_zones if z['type'] == 'bearish']
+
+            if not bearish_zones:
+                return None
+
+            # Ищем зону выше цены (сопротивление)
+            above = [z for z in bearish_zones if z['low'] > current_price]
+            if above:
+                nearest = min(above, key=lambda x: x['low'])
+                distance_pct = (nearest['low'] - current_price) / current_price * 100
+                logger.debug(f"📉 Ближайший bearish FVG выше: {nearest['low']:.4f}-{nearest['high']:.4f} (расст: {distance_pct:.2f}%)")
+                return nearest
+
+            # Если нет выше, берём самую близкую снизу
+            nearest = max(bearish_zones, key=lambda x: x['high'])
+            distance_pct = (current_price - nearest['high']) / current_price * 100
+            logger.debug(f"📉 Ближайший bearish FVG ниже: {nearest['low']:.4f}-{nearest['high']:.4f} (расст: {distance_pct:.2f}%)")
+            return nearest
+
+        return None
+
+    # ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ (LEGACY) ==========
 
     def _filter_nearby_levels(self, levels: List[Dict], current_price: float,
                               max_distance_pct: float, level_type: str) -> List[Dict]:
@@ -405,7 +654,6 @@ class Screen2Analyzer:
         source = 'HISTORICAL' if 'HISTORICAL' in sources else 'H4'
         confluence = len(sources) > 1
 
-        # 🆕 Определяем timeframe (приоритет: W1 > D1 > H4)
         timeframes = [l.get('timeframe', '') for l in group if l.get('timeframe')]
         if 'W1' in timeframes:
             best_timeframe = 'W1'
@@ -424,7 +672,7 @@ class Screen2Analyzer:
             'confluence': confluence,
             'touches': sum(l.get('touches', 1) for l in group),
             'type': group[0].get('type', 'SUPPORT'),
-            'timeframe': best_timeframe  # 🆕 ДОБАВЛЕНО
+            'timeframe': best_timeframe
         }
 
     def _calculate_score(self, fib_levels, supports, resistances,
@@ -494,8 +742,6 @@ class Screen2Analyzer:
         candidates.sort(key=sort_key, reverse=True)
 
         return candidates[0]
-
-    # ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
 
     def _validate_symbol(self, symbol: str) -> bool:
         if not symbol:

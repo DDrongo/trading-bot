@@ -287,7 +287,6 @@ class AnalysisOrchestrator:
         session = self.create_session(symbols)
 
         try:
-            # В Light режиме используем кэшированные ликвидные символы
             if self.trading_mode == 'light':
                 filtered_symbols = symbols
                 logger.info(f"📊 Light режим: анализируем {len(filtered_symbols)} ликвидных символов")
@@ -305,7 +304,6 @@ class AnalysisOrchestrator:
                 filtered_symbols = prefilter_result.filtered_symbols
                 logger.info(f"✅ Префильтр: {len(symbols)} → {len(filtered_symbols)} символов")
 
-            # ========== ПРОВЕРКА И СБОР ИСТОРИЧЕСКИХ УРОВНЕЙ ==========
             logger.info("🔍 ШАГ 1.5: Проверка исторических уровней...")
             levels_checked = 0
             levels_missing = 0
@@ -319,7 +317,6 @@ class AnalysisOrchestrator:
             session.levels_collected = levels_missing
             logger.info(f"✅ Проверка уровней: {levels_checked} символов, у {levels_missing} запущен сбор")
 
-            # ========== ПРОВЕРКА WATCH ДУБЛИКАТОВ (только для Pro) ==========
             if self.trading_mode == 'light':
                 symbols_to_analyze = filtered_symbols
                 duplicate_skipped_symbols = []
@@ -375,7 +372,6 @@ class AnalysisOrchestrator:
                 results[symbol] = result
                 session.analysis_results[symbol] = result
 
-                # ========== СОХРАНЕНИЕ WATCH СИГНАЛОВ (только для Pro) ==========
                 if self.trading_mode != 'light':
                     if result.screen2 and result.screen2.passed:
                         screen2_score = getattr(result.screen2, 'screen2_score', 0)
@@ -394,14 +390,37 @@ class AnalysisOrchestrator:
                             position_size = position_value / current_price if current_price > 0 else 0.001
                             position_size = max(0.001, min(1000000.0, position_size))
 
-                            # 🆕 Используем ЕДИНЫЙ генератор из ThreeScreenAnalyzer
-                            # Передаём screen3 (даже если пустой) для полного комментария
                             learning_comment = self.three_screen_analyzer._generate_full_analysis_description(
                                 symbol=symbol,
                                 screen1=result.screen1,
                                 screen2=result.screen2,
                                 screen3=result.screen3 if result.screen3 else None
                             )
+
+                            # ========== ПОЛУЧАЕМ ДАННЫЕ ДЛЯ SNIPER ==========
+                            entry_type = getattr(result.screen2, 'entry_type', 'LEGACY')
+
+                            # Данные о выбранном FVG
+                            selected_fvg = getattr(result.screen2, 'selected_fvg', None)
+                            fvg_type = selected_fvg.get('type', '') if selected_fvg else ''
+                            fvg_formed_at = selected_fvg.get('formed_at', None)
+                            if fvg_formed_at:
+                                if hasattr(fvg_formed_at, 'isoformat'):
+                                    fvg_formed_at = fvg_formed_at.isoformat()
+                                else:
+                                    fvg_formed_at = str(fvg_formed_at)
+                            fvg_age = selected_fvg.get('age', 0) if selected_fvg else 0
+                            fvg_strength = selected_fvg.get('strength', '') if selected_fvg else ''
+
+                            # Данные о выбранном пуле
+                            selected_pool = getattr(result.screen2, 'selected_liquidity_pool', None)
+                            selected_pool_price = selected_pool.get('price', 0) if selected_pool else 0
+                            selected_pool_touches = selected_pool.get('touches', 0) if selected_pool else 0
+
+                            # Все пулы в JSON
+                            liquidity_pools = getattr(result.screen2, 'liquidity_pools', [])
+                            import json
+                            liquidity_pools_json = json.dumps(liquidity_pools) if liquidity_pools else None
 
                             signal_id = await signal_repository.save_watch_signal(
                                 symbol=symbol,
@@ -410,12 +429,20 @@ class AnalysisOrchestrator:
                                 zone_high=result.screen2.zone_high,
                                 screen2_score=screen2_score,
                                 expected_pattern=result.screen2.expected_pattern,
-                                expiration_hours=self.watch_config.get('expiration_hours', 3),
+                                expiration_hours=self.watch_config.get('expiration_hours', 8),
                                 position_size=position_size,
                                 entry_price=current_price,
                                 leverage=leverage,
                                 current_price=current_price,
-                                learning_comment=learning_comment
+                                learning_comment=learning_comment,
+                                entry_type=entry_type,
+                                fvg_type=fvg_type,
+                                fvg_formed_at=fvg_formed_at,
+                                fvg_age=fvg_age,
+                                fvg_strength=fvg_strength,
+                                liquidity_pools=liquidity_pools_json,
+                                selected_pool_price=selected_pool_price,
+                                selected_pool_touches=selected_pool_touches
                             )
                             if signal_id:
                                 session.watch_signals += 1
