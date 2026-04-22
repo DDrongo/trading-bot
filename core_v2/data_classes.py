@@ -128,6 +128,7 @@ class Screen3Result:
 
 
 @dataclass
+@dataclass
 class ThreeScreenAnalysis:
     """Результат трехэкранного анализа"""
     screen1: Screen1Result = field(default_factory=Screen1Result)
@@ -145,6 +146,11 @@ class ThreeScreenAnalysis:
     zone_high: float = 0.0
     expected_pattern: str = ""
     screen2_score: int = 0
+
+    # ✅ ФАЗА 2.2: W1 Analyzer и Market Stage
+    market_stage: str = "UNDEFINED"   # BULL_CORRECTION, TREND_CONTINUATION, BEAR_CORRECTION
+    bias: str = "NEUTRAL"             # AGGRESSIVE_BUY, CAUTIOUS_BUY, AGGRESSIVE_SELL, CAUTIOUS_SELL
+    w1_trend: str = "SIDEWAYS"        # BULL, BEAR, SIDEWAYS
 
 
 # ========== SIGNALS AND TRADES ==========
