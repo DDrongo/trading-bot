@@ -128,29 +128,23 @@ class Screen3Result:
 
 
 @dataclass
-@dataclass
 class ThreeScreenAnalysis:
-    """Результат трехэкранного анализа"""
+    symbol: str = ""              # ← перенесли сюда
     screen1: Screen1Result = field(default_factory=Screen1Result)
     screen2: Screen2Result = field(default_factory=Screen2Result)
     screen3: Screen3Result = field(default_factory=Screen3Result)
     overall_confidence: float = 0.0
     risk_reward_ratio: float = 0.0
-    symbol: str = ""
     signal_type: SignalType = SignalType.M15
     timestamp: datetime = field(default_factory=datetime.now)
     should_trade: bool = False
-
-    # ✅ НОВЫЕ ПОЛЯ для Фазы 1.3.6 (из Screen2 для сохранения)
     zone_low: float = 0.0
     zone_high: float = 0.0
     expected_pattern: str = ""
     screen2_score: int = 0
-
-    # ✅ ФАЗА 2.2: W1 Analyzer и Market Stage
-    market_stage: str = "UNDEFINED"   # BULL_CORRECTION, TREND_CONTINUATION, BEAR_CORRECTION
-    bias: str = "NEUTRAL"             # AGGRESSIVE_BUY, CAUTIOUS_BUY, AGGRESSIVE_SELL, CAUTIOUS_SELL
-    w1_trend: str = "SIDEWAYS"        # BULL, BEAR, SIDEWAYS
+    market_stage: str = "UNDEFINED"
+    bias: str = "NEUTRAL"
+    w1_trend: str = "SIDEWAYS"
 
 
 # ========== SIGNALS AND TRADES ==========
