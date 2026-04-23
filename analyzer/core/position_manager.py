@@ -61,15 +61,14 @@ class PositionManager:
         self.min_risk_distance_pct = 0.1
         self.risk_per_trade_pct = self.pos_config.get('position_sizing', {}).get('risk_per_trade_pct', 2.0)
 
+        # ФАЗА 2.0 SMC: множители позиции (2 типа, FALLBACK удалён)
         self.position_multipliers = {
             'SNIPER': 1.0,
-            'TREND': 0.75,
-            'LEGACY': 0.5
+            'TREND': 0.75
         }
-        logger.info(f"🎯 Position Manager (Фаза 2.0 SMC)")
+        logger.info(f"🎯 Position Manager (Фаза 2.2 SMC)")
         logger.info(f"   Множители позиции: SNIPER={self.position_multipliers['SNIPER']:.0%}, "
-                    f"TREND={self.position_multipliers['TREND']:.0%}, "
-                    f"LEGACY={self.position_multipliers['LEGACY']:.0%}")
+                    f"TREND={self.position_multipliers['TREND']:.0%}")
 
         self.paper_account = PaperAccount(config)
         self.open_positions: Dict[int, PaperPosition] = {}
@@ -83,7 +82,6 @@ class PositionManager:
         logger.info(f"   Макс. суммарный риск: {self.max_total_risk_pct}%")
         logger.info(f"   Риск на сделку: {self.risk_per_trade_pct}%")
         logger.info(f"   Макс. slippage: {self.max_slippage_pct}%")
-        logger.info(f"   Формула: залог = риск% от депозита")
 
     def _round_price(self, price: float, symbol: str = "") -> float:
         try:
@@ -202,15 +200,30 @@ class PositionManager:
             leverage = signal_data.get('leverage', 10)
 
             # ФАЗА 2.0: Получаем entry_type и множитель позиции
-            entry_type = signal_data.get('entry_type', 'LEGACY')
-            position_multiplier = signal_data.get('position_multiplier',
-                                                  self.position_multipliers.get(entry_type, 0.75))
+            entry_type = signal_data.get('entry_type', 'TREND')
+            market_stage = signal_data.get('market_stage', 'UNDEFINED')  # ← НОВОЕ
             liquidity_grabbed = signal_data.get('liquidity_grabbed', False)
             fvg_present = signal_data.get('fvg_present', False)
             grab_price = signal_data.get('grab_price', None)
 
+            # Базовый множитель по типу сигнала
+            base_multiplier = self.position_multipliers.get(entry_type, 0.75)
+
+            # Множитель по стадии рынка (ФАЗА 2.2)
+            stage_multiplier = {
+                'TREND_CONTINUATION': 1.0,
+                'BULL_CORRECTION': 0.5,
+                'BEAR_CORRECTION': 0.5,
+                'UNDEFINED': 0.7
+            }.get(market_stage, 0.7)
+
+            # Итоговый множитель
+            position_multiplier = base_multiplier * stage_multiplier
+
             logger.info(f"🔔 Position Manager: получен сигнал {signal_id} для {symbol}")
-            logger.info(f"   Тип входа: {entry_type}, множитель: {position_multiplier:.0%}")
+            logger.info(f"   Тип входа: {entry_type} (базовый {base_multiplier:.0%})")
+            logger.info(f"   Стадия рынка: {market_stage} (множитель {stage_multiplier:.0%})")
+            logger.info(f"   Итоговый размер позиции: {position_multiplier:.0%} от стандарта")
             if liquidity_grabbed:
                 if grab_price:
                     logger.info(f"   💧 Liquidity Grab: ДА (прокол {grab_price:.6f})")
@@ -228,18 +241,15 @@ class PositionManager:
 
             logger.info(f"{'=' * 60}")
             logger.info(f"💰 ОТКРЫТИЕ ПОЗИЦИИ #{signal_id} ({symbol})")
-            logger.info(f"   Тип входа: {entry_type} (множитель {position_multiplier:.0%})")
             logger.info(f"{'=' * 60}")
             logger.info(f"   Направление: {direction}")
             logger.info(f"   Планируемый вход: {planned_entry:.6f}")
             logger.info(f"   Фактическая цена: {fill_price:.6f}")
-            logger.info(f"   Время: {format_local(now())}")
 
             deviation_pct = abs(fill_price - planned_entry) / planned_entry * 100
 
             if deviation_pct > self.max_slippage_pct:
                 logger.warning(f"⚠️ Отклонение {deviation_pct:.2f}% > {self.max_slippage_pct}%")
-                logger.warning(f"   Причина REJECTED: slippage превышен")
                 await signal_repository.update_signal_status(signal_id, 'REJECTED')
                 return
 
@@ -257,33 +267,29 @@ class PositionManager:
             logger.info(f"   SL (пересчитан): {stop_loss:.6f}")
             logger.info(f"   TP (пересчитан): {take_profit:.6f}")
 
-            # ========== РАСЧЁТ РАЗМЕРА ПОЗИЦИИ С УЧЁТОМ ENTRY_TYPE ==========
+            # РАСЧЁТ РАЗМЕРА ПОЗИЦИИ С УЧЁТОМ ENTRY_TYPE И MARKET_STAGE
             balance = await self.paper_account.get_balance()
-
-            # Базовый риск в USDT (2% от депозита по умолчанию)
             base_risk_amount = balance * (self.risk_per_trade_pct / 100.0)
 
-            # Применяем множитель в зависимости от типа входа
+            # Применяем итоговый множитель
             risk_amount = base_risk_amount * position_multiplier
 
-            logger.info(f"\n📊 РАСЧЁТ РАЗМЕРА ПОЗИЦИИ (SMC):")
+            logger.info(f"\n📊 РАСЧЁТ РАЗМЕРА ПОЗИЦИИ (SMC + Market Stage):")
             logger.info(f"   Баланс: {balance:.2f} USDT")
-            logger.info(f"   Базовый риск: {base_risk_amount:.2f} USDT ({self.risk_per_trade_pct}% от депозита)")
-            logger.info(f"   Тип входа: {entry_type} (множитель {position_multiplier:.0%})")
+            logger.info(f"   Базовый риск: {base_risk_amount:.2f} USDT ({self.risk_per_trade_pct}%)")
+            logger.info(
+                f"   Множитель (тип {entry_type} × стадия): {base_multiplier:.0%} × {stage_multiplier:.0%} = {position_multiplier:.0%}")
             logger.info(f"   Итоговый риск: {risk_amount:.2f} USDT")
 
-            # Рассчитываем расстояние до SL
             risk_distance = abs(fill_price - stop_loss)
             if risk_distance <= 0:
-                logger.error(f"❌ risk_distance = 0, невозможно рассчитать позицию")
+                logger.error(f"❌ risk_distance = 0")
                 await signal_repository.update_signal_status(signal_id, 'REJECTED')
                 return
 
-            # Количество монет = риск / расстояние до SL
             quantity = risk_amount / risk_distance
             logger.info(f"   Количество монет (расчётное): {quantity:.6f}")
 
-            # Применяем плечо
             position_value = quantity * fill_price
             margin = position_value / leverage
 
@@ -291,7 +297,6 @@ class PositionManager:
             logger.info(f"   Залог (маржа): {margin:.2f} USDT")
             logger.info(f"   Плечо: {leverage}x")
 
-            # Округляем количество
             quantity = self._round_quantity(quantity, symbol)
 
             if quantity > self.max_quantity:
@@ -301,7 +306,6 @@ class PositionManager:
                 quantity = self.min_quantity
                 logger.warning(f"   ⚠️ Увеличенно до минимума: {quantity:.6f}")
 
-            # Пересчитываем фактический риск
             actual_position_value = quantity * fill_price
             actual_margin = actual_position_value / leverage
             actual_risk = quantity * risk_distance
@@ -315,7 +319,6 @@ class PositionManager:
 
             if actual_margin > balance:
                 logger.error(f"❌ Залог {actual_margin:.2f} > баланс {balance:.2f}")
-                logger.warning(f"   Причина REJECTED: недостаточно средств")
                 await signal_repository.update_signal_status(signal_id, 'REJECTED')
                 return
 
@@ -323,10 +326,9 @@ class PositionManager:
             await signal_repository.update_leverage(signal_id, leverage)
             await signal_repository.update_entry_type(signal_id, entry_type)
 
-            # ========== РАСЧЁТ КОМИССИЙ ==========
-            commission_rate = 0.0006  # 0.06% (типичная комиссия Bybit для фьючерсов)
+            commission_rate = 0.0006
             commission_open = actual_position_value * commission_rate
-            commission_close = actual_position_value * commission_rate  # приблизительно
+            commission_close = actual_position_value * commission_rate
 
             logger.info(f"\n💰 КОМИССИИ:")
             logger.info(f"   За открытие: {commission_open:.4f} USDT ({commission_rate * 100:.2f}%)")
@@ -341,7 +343,6 @@ class PositionManager:
                 )
             except ValueError as e:
                 logger.error(f"❌ Ошибка открытия позиции: {e}")
-                logger.warning(f"   Причина REJECTED: {str(e)}")
                 await signal_repository.update_signal_status(signal_id, 'REJECTED')
                 return
 
@@ -362,10 +363,10 @@ class PositionManager:
             await trade_repository.save_trade(trade_data)
 
             logger.info(f"\n✅ ПОЗИЦИЯ #{signal_id} ОТКРЫТА!")
-            logger.info(f"   Тип входа: {entry_type} (множитель {position_multiplier:.0%})")
+            logger.info(f"   Тип входа: {entry_type} (множитель {base_multiplier:.0%})")
+            logger.info(f"   Стадия рынка: {market_stage} (множитель {stage_multiplier:.0%})")
             logger.info(f"   {symbol} {direction} {quantity:.6f} монет @ {fill_price:.6f}")
             logger.info(f"   Залог: {position.margin:.2f} USDT")
-            logger.info(f"   Комиссия за открытие: {commission_open:.4f} USDT")
             logger.info(f"   Новый баланс: {await self.paper_account.get_balance():.2f} USDT")
             logger.info(f"{'=' * 60}")
 
@@ -376,7 +377,8 @@ class PositionManager:
                     'entry_price': fill_price, 'quantity': quantity, 'leverage': leverage,
                     'margin': position.margin, 'stop_loss': stop_loss,
                     'take_profit': take_profit, 'order_type': 'MARKET', 'fill_price': fill_price,
-                    'entry_type': entry_type, 'position_multiplier': position_multiplier,
+                    'entry_type': entry_type, 'market_stage': market_stage,
+                    'position_multiplier': position_multiplier,
                     'commission_open': commission_open, 'commission_close': commission_close
                 },
                 'position_manager'

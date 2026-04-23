@@ -56,10 +56,11 @@ analysis:
     continuous_analysis_interval: 15
     continuous_max_concurrent: 3
     kline_limits:
-      15m: 100
+      1w: 52
       1d: 100
-      1h: 50
       4h: 50
+      1h: 50
+      15m: 100
       5m: 50
     log_symbols_limit: 10
     max_concurrent_analysis: 3

@@ -32,20 +32,9 @@ class LiquidityPool:
 class LiquidityScanner:
     """
     Сканер бассейнов ликвидности на H4 таймфрейме
-
-    Логика:
-    1. Находит локальные минимумы (Swing Lows) и максимумы (Swing Highs)
-    2. Группирует экстремумы на одном ценовом уровне (погрешность 0.3%)
-    3. Если на уровне 2+ касаний — это пул ликвидности
     """
 
     def __init__(self, lookback_candles: int = 100, price_tolerance_pct: float = 0.3, swing_lookback: int = 3):
-        """
-        Args:
-            lookback_candles: количество свечей для анализа
-            price_tolerance_pct: погрешность для группировки уровней (0.3% по умолчанию)
-            swing_lookback: количество свечей для определения локальных экстремумов
-        """
         self.lookback_candles = lookback_candles
         self.price_tolerance_pct = price_tolerance_pct / 100
         self.swing_lookback = swing_lookback
@@ -56,44 +45,25 @@ class LiquidityScanner:
         logger.info(f"   Swing lookback: {swing_lookback}")
 
     def find_liquidity_pools(self, klines_h4: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Находит все пулы ликвидности в H4 данных
-
-        Args:
-            klines_h4: список H4 свечей
-
-        Returns:
-            Список пулов ликвидности с полями:
-                - type: 'BUY_SIDE' или 'SELL_SIDE'
-                - price: уровень
-                - touches: количество касаний
-                - strength: 'STRONG' или 'NORMAL'
-        """
+        """Находит все пулы ликвидности в H4 данных"""
         if not klines_h4 or len(klines_h4) < self.swing_lookback * 2 + 1:
             logger.warning("⚠️ Недостаточно данных для поиска ликвидности")
             return []
 
-        # Берём только последние N свечей
         candles = klines_h4[-self.lookback_candles:] if len(klines_h4) > self.lookback_candles else klines_h4
 
-        # Находим локальные экстремумы
         swing_highs = self._find_swing_highs(candles)
         swing_lows = self._find_swing_lows(candles)
 
         logger.debug(f"📊 Найдено локальных максимумов: {len(swing_highs)}")
         logger.debug(f"📊 Найдено локальных минимумов: {len(swing_lows)}")
 
-        # Группируем уровни
         grouped_highs = self._group_levels(swing_highs, 'BUY_SIDE')
         grouped_lows = self._group_levels(swing_lows, 'SELL_SIDE')
 
-        # Объединяем результаты
         all_pools = grouped_highs + grouped_lows
-
-        # Фильтруем только пулы с 2+ касаниями
         valid_pools = [p for p in all_pools if p['touches'] >= 2]
 
-        # Рассчитываем силу
         for pool in valid_pools:
             pool['strength'] = 'STRONG' if pool['touches'] >= 3 else 'NORMAL'
 
@@ -105,7 +75,7 @@ class LiquidityScanner:
         return valid_pools
 
     def _find_swing_highs(self, candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Находит локальные максимумы (Swing Highs)"""
+        """Находит локальные максимумы (Swing Highs) с индексом и timestamp"""
         swing_highs = []
 
         for i in range(self.swing_lookback, len(candles) - self.swing_lookback):
@@ -117,13 +87,13 @@ class LiquidityScanner:
                 swing_highs.append({
                     'price': current_high,
                     'index': i,
-                    'timestamp': candles[i].get('timestamp')
+                    'timestamp': candles[i].get('timestamp', 0)
                 })
 
         return swing_highs
 
     def _find_swing_lows(self, candles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Находит локальные минимумы (Swing Lows)"""
+        """Находит локальные минимумы (Swing Lows) с индексом и timestamp"""
         swing_lows = []
 
         for i in range(self.swing_lookback, len(candles) - self.swing_lookback):
@@ -135,17 +105,16 @@ class LiquidityScanner:
                 swing_lows.append({
                     'price': current_low,
                     'index': i,
-                    'timestamp': candles[i].get('timestamp')
+                    'timestamp': candles[i].get('timestamp', 0)
                 })
 
         return swing_lows
 
     def _group_levels(self, levels: List[Dict[str, Any]], pool_type: str) -> List[Dict[str, Any]]:
-        """Группирует близкие ценовые уровни"""
+        """Группирует близкие ценовые уровни с сохранением timestamp"""
         if not levels:
             return []
 
-        # Сортируем по цене
         sorted_levels = sorted(levels, key=lambda x: x['price'])
 
         groups = []
@@ -158,24 +127,26 @@ class LiquidityScanner:
             if diff_pct < self.price_tolerance_pct:
                 current_group.append(level)
             else:
-                # Сохраняем группу
                 avg_price = sum(l['price'] for l in current_group) / len(current_group)
+                min_timestamp = min(l.get('timestamp', 0) for l in current_group)
                 groups.append({
                     'type': pool_type,
                     'price': avg_price,
                     'touches': len(current_group),
-                    'formed_at': min(l.get('index', 0) for l in current_group)
+                    'formed_at': min_timestamp,
+                    'strength': 'STRONG' if len(current_group) >= 3 else 'NORMAL'
                 })
                 current_group = [level]
 
-        # Последняя группа
         if current_group:
             avg_price = sum(l['price'] for l in current_group) / len(current_group)
+            min_timestamp = min(l.get('timestamp', 0) for l in current_group)
             groups.append({
                 'type': pool_type,
                 'price': avg_price,
                 'touches': len(current_group),
-                'formed_at': min(l.get('index', 0) for l in current_group)
+                'formed_at': min_timestamp,
+                'strength': 'STRONG' if len(current_group) >= 3 else 'NORMAL'
             })
 
         return groups
@@ -186,17 +157,7 @@ class LiquidityScanner:
         current_price: float,
         direction: str = 'SELL_SIDE'
     ) -> Optional[Dict[str, Any]]:
-        """
-        Находит ближайший пул ликвидности к текущей цене
-
-        Args:
-            pools: список пулов ликвидности
-            current_price: текущая цена
-            direction: 'BUY_SIDE' (выше цены) или 'SELL_SIDE' (ниже цены)
-
-        Returns:
-            Ближайший пул или None
-        """
+        """Находит ближайший пул ликвидности к текущей цене"""
         if not pools:
             return None
 
@@ -206,13 +167,11 @@ class LiquidityScanner:
             return None
 
         if direction == 'SELL_SIDE':
-            # Ищем пул ниже цены (стопы лонгистов)
             below = [p for p in filtered if p['price'] < current_price]
             if below:
                 return max(below, key=lambda x: x['price'])
             return None
         else:
-            # Ищем пул выше цены (стопы шортистов)
             above = [p for p in filtered if p['price'] > current_price]
             if above:
                 return min(above, key=lambda x: x['price'])
@@ -225,46 +184,29 @@ class LiquidityScanner:
         current_price: float,
         lookback_candles: int = 5
     ) -> Tuple[bool, Optional[float]]:
-        """
-        Проверяет, было ли снятие ликвидности (Liquidity Grab)
-
-        Liquidity Grab происходит когда:
-        1. Цена пробила уровень ликвидности (ниже минимума для SELL_SIDE или выше максимума для BUY_SIDE)
-        2. И вернулась обратно
-
-        Args:
-            klines_h4: H4 свечи
-            liquidity_pool: пул ликвидности
-            current_price: текущая цена
-            lookback_candles: сколько свечей анализировать
-
-        Returns:
-            (был ли греб, цена прокола)
-        """
+        """Проверяет, было ли снятие ликвидности (Liquidity Grab)"""
         if not klines_h4 or not liquidity_pool:
             return False, None
 
         pool_price = liquidity_pool['price']
         pool_type = liquidity_pool['type']
 
-        # Берём последние N свечей
         recent_candles = klines_h4[-lookback_candles:]
 
         if pool_type == 'SELL_SIDE':
-            # Проверяем прокол ниже пула (стопы лонгистов)
             for candle in recent_candles:
                 if candle['low'] < pool_price:
-                    # Был прокол, проверяем возврат
                     if current_price > pool_price:
                         logger.debug(f"💧 Обнаружен Liquidity Grab: прокол {pool_price:.4f} → возврат {current_price:.4f}")
                         return True, candle['low']
-        else:  # BUY_SIDE
-            # Проверяем прокол выше пула (стопы шортистов)
+        else:
             for candle in recent_candles:
                 if candle['high'] > pool_price:
-                    # Был прокол, проверяем возврат
                     if current_price < pool_price:
                         logger.debug(f"💧 Обнаружен Liquidity Grab: прокол {pool_price:.4f} → возврат {current_price:.4f}")
                         return True, candle['high']
 
         return False, None
+
+
+__all__ = ['LiquidityScanner', 'LiquidityPool']

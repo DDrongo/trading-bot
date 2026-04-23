@@ -246,7 +246,7 @@ class Screen3SignalGenerator:
                 return result
 
             # ========== ФАЗА 2.0: ПОЛУЧАЕМ SMC ДАННЫЕ ИЗ SCREEN2 ==========
-            entry_type = getattr(screen2_result, 'entry_type', 'LEGACY')
+            entry_type = getattr(screen2_result, 'entry_type', 'FALLBACK')
             fvg_zones = getattr(screen2_result, 'fvg_zones', [])
             liquidity_pools = getattr(screen2_result, 'liquidity_pools', [])
             selected_fvg = getattr(screen2_result, 'selected_fvg', None)
@@ -378,7 +378,7 @@ class Screen3SignalGenerator:
                 print(f"{'─' * 60}\n")
 
             else:
-                # Legacy Entry
+                # FALLBACK Entry
                 if zone_low > 0 and zone_high > 0 and real_current_price and real_current_price > 0:
                     if zone_low <= real_current_price <= zone_high:
                         entry_price = real_current_price

@@ -31,6 +31,7 @@ class FVGZone:
     age: int  # количество свечей с момента формирования
     strength: str  # 'STRONG', 'NORMAL', 'WEAK'
     formed_at: Optional[datetime] = None
+    formed_at_index: int = 0  # индекс свечи №3
     is_active: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
@@ -137,9 +138,10 @@ class FVGDetector:
                 'type': 'bullish',
                 'low': c1_high,
                 'high': c3_low,
-                'formed_at': c2.get('timestamp'),
+                'formed_at': c3.get('timestamp'),
                 'age': 0,
-                'strength': 'NORMAL'
+                'strength': 'STRONG' if gap_pct > 0.005 else 'NORMAL',
+                'formed_at_index': idx + 2   # индекс свечи №3
             }
 
         except Exception as e:
@@ -176,9 +178,10 @@ class FVGDetector:
                 'type': 'bearish',
                 'low': c1_low,
                 'high': c3_high,
-                'formed_at': c2.get('timestamp'),
+                'formed_at': c3.get('timestamp'),
                 'age': 0,
-                'strength': 'NORMAL'
+                'strength': 'STRONG' if gap_pct > 0.005 else 'NORMAL',
+                'formed_at_index': idx + 2   # индекс свечи №3
             }
 
         except Exception as e:
@@ -207,6 +210,8 @@ class FVGDetector:
                 if zone.get('formed_at') and last.get('formed_at'):
                     if zone['formed_at'] < last['formed_at']:
                         last['formed_at'] = zone['formed_at']
+                # Объединяем formed_at_index
+                last['formed_at_index'] = min(last.get('formed_at_index', 999), zone.get('formed_at_index', 999))
             else:
                 merged.append(zone.copy())
 
