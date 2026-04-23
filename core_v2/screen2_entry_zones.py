@@ -30,6 +30,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Импорты SMC модулей из core_v2/analyst/
+from core_v2.analyst.fvg_detector import FVGDetector
+from core_v2.analyst.liquidity_scanner import LiquidityScanner
+
 
 class Screen2Analyzer:
     """Анализатор зон входа (Экран 2) с историческими уровнями и SMC"""
@@ -82,7 +86,7 @@ class Screen2Analyzer:
         self._fvg_detector = None
         self._liquidity_scanner = None
 
-        logger.info(f"✅ Screen2Analyzer инициализирован (Фаза 2.0 SMC)")
+        logger.info(f"✅ Screen2Analyzer инициализирован (Фаза 2.2 с фильтрацией FVG)")
         logger.info(f"   Исторические уровни: ВКЛЮЧЕНЫ")
         logger.info(
             f"   W1: {self.HISTORICAL_CONFIG['W1']['years_back']} лет, мин. {self.HISTORICAL_CONFIG['W1']['min_touches']} касаний")
@@ -90,7 +94,8 @@ class Screen2Analyzer:
             f"   D1: {self.HISTORICAL_CONFIG['D1']['years_back']} год, мин. {self.HISTORICAL_CONFIG['D1']['min_touches']} касания")
         logger.info(f"   БД: {self.db_path}")
         logger.info(f"   🆕 SMC: FVG Detector + Liquidity Scanner")
-        logger.info(f"   🆕 Приоритет: SNIPER > TREND > LEGACY")
+        logger.info(f"   🆕 Приоритет: SNIPER > TREND > FALLBACK")
+        logger.info(f"   🆕 Фильтрация FVG: возраст < 15, без возвращений, касаний <= 1")
 
     def _get_db_path(self) -> str:
         """Получение пути к БД исторических уровней (ОТДЕЛЬНАЯ БД)"""
@@ -136,6 +141,88 @@ class Screen2Analyzer:
                 logger.warning(f"⚠️ Не удалось импортировать FVGDetector: {e}")
                 self._fvg_detector = None
         return self._fvg_detector
+
+    def _check_fvg_visited(self, fvg_zone: Dict, candles: List[Dict]) -> bool:
+        """
+        Проверяет, возвращалась ли цена в FVG зону после её формирования
+
+        Args:
+            fvg_zone: FVG зона с ключами 'low', 'high', 'index' (индекс свечи №3)
+            candles: Список свечей
+
+        Returns:
+            True если цена была в зоне, False если нет
+        """
+        zone_low = fvg_zone.get('low', 0)
+        zone_high = fvg_zone.get('high', 0)
+        formed_at_index = fvg_zone.get('formed_at_index', 0)
+
+        if zone_low == 0 or zone_high == 0:
+            return False
+
+        # Проверяем свечи после формирования зоны
+        for i in range(formed_at_index + 1, len(candles)):
+            candle = candles[i]
+            candle_low = candle.get('low', 0)
+            candle_high = candle.get('high', 0)
+
+            # Цена зашла в зону
+            if candle_low <= zone_high and candle_high >= zone_low:
+                return True
+
+        return False
+
+    def _count_fvg_touches(self, fvg_zone: Dict, candles: List[Dict]) -> int:
+        """
+        Считает количество касаний FVG зоны
+
+        Args:
+            fvg_zone: FVG зона
+            candles: Список свечей
+
+        Returns:
+            Количество касаний
+        """
+        zone_low = fvg_zone.get('low', 0)
+        zone_high = fvg_zone.get('high', 0)
+        formed_at_index = fvg_zone.get('formed_at_index', 0)
+
+        if zone_low == 0 or zone_high == 0:
+            return 0
+
+        touches = 0
+        for i in range(formed_at_index + 1, len(candles)):
+            candle = candles[i]
+            candle_low = candle.get('low', 0)
+            candle_high = candle.get('high', 0)
+
+            # Проверяем касание (цена коснулась границы или вошла внутрь)
+            if abs(candle_low - zone_high) / zone_high < 0.001 or \
+                    abs(candle_high - zone_low) / zone_low < 0.001 or \
+                    (candle_low <= zone_high and candle_high >= zone_low):
+                touches += 1
+
+        return touches
+
+    def _filter_fvg_by_quality(self, fvg_zones: List[Dict], candles: List[Dict]) -> List[Dict]:
+        """Фильтрует FVG зоны по качеству (возраст < 30, касаний <= 1)"""
+        quality_zones = []
+
+        for zone in fvg_zones:
+            age = zone.get('age', 999)
+
+            if age >= 30:
+                continue
+
+            touches = self._count_fvg_touches(zone, candles)
+            if touches > 1:
+                continue
+
+            zone['quality'] = 'FRESH' if touches == 0 else 'TESTED'
+            zone['was_visited'] = self._check_fvg_visited(zone, candles)
+            quality_zones.append(zone)
+
+        return quality_zones
 
     def _get_liquidity_scanner(self):
         """Ленивая инициализация Liquidity Scanner"""
@@ -375,6 +462,8 @@ class Screen2Analyzer:
     # ========== ФАЗА 2.0: SMC МЕТОДЫ ==========
 
     def _analyze_smc_zones(self, h4_data, trend_direction, current_price, symbol):
+        """Анализ SMC зон (FVG + Liquidity) с фильтрацией по качеству"""
+
         fvg_detector = self._get_fvg_detector()
         liquidity_scanner = self._get_liquidity_scanner()
 
@@ -382,62 +471,73 @@ class Screen2Analyzer:
             return {'success': False, 'reason': 'FVGDetector не доступен'}
 
         converted_klines = self._convert_to_klines_dict(h4_data)
-        fvg_zones = fvg_detector.find_fvg(converted_klines)
 
-        if not fvg_zones:
+        # ========== 1. НАХОДИМ ВСЕ FVG ЗОНЫ ==========
+        all_fvg_zones = fvg_detector.find_fvg(converted_klines)
+
+        if not all_fvg_zones:
             return {'success': False, 'reason': 'FVG зоны не найдены'}
 
-        logger.debug(f"🕳️ {symbol}: найдено {len(fvg_zones)} FVG зон")
+        logger.info(f"🕳️ {symbol}: найдено {len(all_fvg_zones)} FVG зон")
 
+        # ========== 2. ФИЛЬТРУЕМ FVG ПО КАЧЕСТВУ ==========
+        quality_fvg_zones = self._filter_fvg_by_quality(all_fvg_zones, converted_klines)
+
+        logger.info(f"🕳️ {symbol}: после фильтрации осталось {len(quality_fvg_zones)} качественных FVG зон")
+
+        # ========== 3. ИЩЕМ LIQUIDITY POOLS ==========
+        liquidity_pools = []
         if liquidity_scanner is not None:
             liquidity_pools = liquidity_scanner.find_liquidity_pools(converted_klines)
-
             if liquidity_pools:
                 logger.debug(f"💧 {symbol}: найдено {len(liquidity_pools)} пулов ликвидности")
-                sniper_zone = self._find_sniper_zone(fvg_zones, liquidity_pools, trend_direction, current_price)
 
-                if sniper_zone:
-                    selected_fvg = sniper_zone.get('fvg_zone', {})
-                    logger.info(f"🎯 {symbol}: SNIPER зона найдена!")
-                    logger.info(f"   FVG: {selected_fvg.get('low', 0):.4f}-{selected_fvg.get('high', 0):.4f}")
-                    logger.info(f"   Liquidity Pool: {sniper_zone.get('liquidity_pool', {}).get('price', 0):.4f}")
+        # ========== 4. ИЩЕМ SNIPER ЗОНУ (FVG + Liquidity) ==========
+        sniper_zone = self._find_sniper_zone(quality_fvg_zones, liquidity_pools, trend_direction, current_price)
 
-                    return {
-                        'success': True,
-                        'score': 8,
-                        'zone_low': sniper_zone['low'],
-                        'zone_high': sniper_zone['high'],
-                        'expected_pattern': 'PIN_BAR',
-                        'reason': 'Sniper entry: FVG above/below liquidity pool',
-                        'entry_type': 'SNIPER',
-                        'fvg_zones': fvg_zones,
-                        'liquidity_pools': liquidity_pools,
-                        'selected_fvg': {
-                            'low': selected_fvg.get('low', 0),
-                            'high': selected_fvg.get('high', 0),
-                            'type': selected_fvg.get('type', 'bullish'),
-                            'age': selected_fvg.get('age', 0),
-                            'strength': selected_fvg.get('strength', 'NORMAL'),
-                            'formed_at': selected_fvg.get('formed_at_dt', None)
-                        },
-                        'selected_liquidity_pool': sniper_zone.get('liquidity_pool')
-                    }
+        if sniper_zone:
+            selected_fvg = sniper_zone.get('fvg_zone', {})
+            logger.info(f"🎯 {symbol}: SNIPER зона найдена!")
+            logger.info(f"   FVG: {selected_fvg.get('low', 0):.4f}-{selected_fvg.get('high', 0):.4f}")
+            logger.info(f"   Liquidity Pool: {sniper_zone.get('liquidity_pool', {}).get('price', 0):.4f}")
 
-        trend_zone = self._find_nearest_fvg_zone(fvg_zones, trend_direction, current_price)
-
-        if trend_zone:
-            logger.info(f"📈 {symbol}: TREND зона найдена (ближайший FVG)")
             return {
                 'success': True,
-                'score': 6,
-                'zone_low': trend_zone['low'],
-                'zone_high': trend_zone['high'],
-                'expected_pattern': 'ENGULFING',
-                'reason': 'Trend entry: nearest FVG',
-                'entry_type': 'TREND',
-                'fvg_zones': fvg_zones,
-                'selected_fvg': trend_zone
+                'score': 8,
+                'zone_low': sniper_zone['low'],
+                'zone_high': sniper_zone['high'],
+                'expected_pattern': 'PIN_BAR',
+                'reason': 'Sniper entry: FVG above/below liquidity pool',
+                'entry_type': 'SNIPER',
+                'fvg_zones': quality_fvg_zones,
+                'liquidity_pools': liquidity_pools,
+                'selected_fvg': {
+                    'low': selected_fvg.get('low', 0),
+                    'high': selected_fvg.get('high', 0),
+                    'type': selected_fvg.get('type', 'bullish'),
+                    'age': selected_fvg.get('age', 0),
+                    'strength': selected_fvg.get('strength', 'NORMAL'),
+                    'formed_at': selected_fvg.get('formed_at_dt', None)
+                },
+                'selected_liquidity_pool': sniper_zone.get('liquidity_pool')
             }
+
+        # ========== 5. TREND ENTRY (ближайший качественный FVG) ==========
+        if quality_fvg_zones:
+            trend_zone = self._find_nearest_fvg_zone(quality_fvg_zones, trend_direction, current_price)
+            if trend_zone:
+                logger.info(f"📈 {symbol}: TREND зона найдена (ближайший качественный FVG)")
+                return {
+                    'success': True,
+                    'score': 6,
+                    'zone_low': trend_zone['low'],
+                    'zone_high': trend_zone['high'],
+                    'expected_pattern': 'ENGULFING',
+                    'reason': 'Trend entry: nearest quality FVG',
+                    'entry_type': 'TREND',
+                    'fvg_zones': quality_fvg_zones,
+                    'selected_fvg': trend_zone
+                }
 
         return {'success': False, 'reason': 'SMC зоны не найдены'}
 
